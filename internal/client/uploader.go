@@ -178,6 +178,13 @@ func (u *ChunkUploader) uploadChunk(fileID string, index int64, data []byte, has
 	}
 	defer confirmResp.Body.Close()
 
+	// 检查响应状态码
+	if confirmResp.StatusCode != http.StatusOK {
+		// 读取错误响应
+		body, _ := io.ReadAll(confirmResp.Body)
+		return "", fmt.Errorf("确认写入失败: %s", string(body))
+	}
+
 	var confirmResult struct {
 		Success bool `json:"success"`
 	}
