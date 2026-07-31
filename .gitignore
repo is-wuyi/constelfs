@@ -1,0 +1,41 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+constelfs-server
+constelfs-client
+constelfs-node
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+
+# Temp files
+tmp/
+temp/
