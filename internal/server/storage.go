@@ -1,7 +1,6 @@
 package server
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"log"
 	"sync"
@@ -30,18 +29,10 @@ type WriteRequest struct {
 
 // WriteResponse 写入响应
 type WriteResponse struct {
-	Success  bool         `json:"success"`
-	ChunkIDs []string     `json:"chunk_ids,omitempty"`
-	Nodes    []string     `json:"nodes,omitempty"`   // 写入的节点列表
-	Error    string       `json:"error,omitempty"`
-}
-
-// ChunkWriteResult 分片写入结果
-type ChunkWriteResult struct {
-	ChunkID string
-	NodeID  string
-	Success bool
-	Error   error
+	Success  bool     `json:"success"`
+	ChunkIDs []string `json:"chunk_ids,omitempty"`
+	Nodes    []string `json:"nodes,omitempty"`   // 写入的节点列表
+	Error    string   `json:"error,omitempty"`
 }
 
 // StorageManager 存储管理器
@@ -115,16 +106,10 @@ func (sm *StorageManager) ConfirmWrite(chunkID string, hash string) error {
 		return fmt.Errorf("分片不存在: %s", chunkID)
 	}
 
-	// 验证hash
-	expectedHash := sha256.Sum256([]byte(chunkID))
-	if hash != fmt.Sprintf("%x", expectedHash) {
-		chunk.Status = "failed"
-		return fmt.Errorf("hash验证失败")
-	}
-
+	// 记录hash并标记为成功
 	chunk.Status = "success"
 	chunk.Hash = hash
-	log.Printf("分片 %s 写入成功", chunkID)
+	log.Printf("分片 %s 写入成功, hash: %s", chunkID, hash)
 
 	return nil
 }
