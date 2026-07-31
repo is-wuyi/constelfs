@@ -15,12 +15,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	configPath := flag.String("config", "config/client.yaml", "配置文件路径")
-	replicas := flag.Int("replicas", 3, "副本数量")
-	flag.Parse()
+	// 创建新的FlagSet来解析子命令参数
+	uploadFlags := flag.NewFlagSet("upload", flag.ExitOnError)
+	replicas := uploadFlags.Int("replicas", 3, "副本数量")
 
 	// 加载配置
-	cfg, err := client.LoadConfig(*configPath)
+	cfg, err := client.LoadConfig("config/client.yaml")
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
@@ -39,7 +39,16 @@ func main() {
 			fmt.Println("用法: constelfs-client upload <文件路径> [--replicas=3]")
 			os.Exit(1)
 		}
-		result, err := c.Upload(os.Args[2], *replicas)
+		// 解析upload子命令的参数
+		uploadFlags.Parse(os.Args[2:])
+		
+		filePath := uploadFlags.Arg(0)
+		if filePath == "" {
+			fmt.Println("用法: constelfs-client upload <文件路径> [--replicas=3]")
+			os.Exit(1)
+		}
+		
+		result, err := c.Upload(filePath, *replicas)
 		if err != nil {
 			log.Fatalf("上传失败: %v", err)
 		}
