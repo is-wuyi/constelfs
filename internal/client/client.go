@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 )
 
 // Client ConstelFS客户端
 type Client struct {
 	config     *Config
 	httpClient *http.Client
+	uploader   *ChunkUploader
 }
 
 // FileInfo 文件信息
@@ -30,35 +30,22 @@ type NodeInfo struct {
 
 // New 创建新的客户端
 func New(config *Config) (*Client, error) {
-	return &Client{
+	c := &Client{
 		config:     config,
 		httpClient: &http.Client{},
-	}, nil
+	}
+	c.uploader = NewChunkUploader(config)
+	return c, nil
 }
 
 // Upload 上传文件
-func (c *Client) Upload(localPath string) error {
-	file, err := os.Open(localPath)
-	if err != nil {
-		return fmt.Errorf("打开文件失败: %w", err)
-	}
-	defer file.Close()
-
-	// TODO: 实现文件上传逻辑
-	// 1. 获取文件信息
-	// 2. 向中心服务器请求上传节点
-	// 3. 分片上传到存储节点
-
-	return fmt.Errorf("上传功能尚未实现")
+func (c *Client) Upload(filePath string, replicas int) (*UploadResult, error) {
+	return c.uploader.Upload(filePath, replicas)
 }
 
 // Download 下载文件
-func (c *Client) Download(remotePath, localPath string) error {
+func (c *Client) Download(fileID, localPath string) error {
 	// TODO: 实现文件下载逻辑
-	// 1. 向中心服务器查询文件位置
-	// 2. 从存储节点下载分片
-	// 3. 组装并保存到本地
-
 	return fmt.Errorf("下载功能尚未实现")
 }
 
@@ -106,7 +93,7 @@ func (c *Client) List(dirPath string) ([]*FileInfo, error) {
 }
 
 // Delete 删除文件
-func (c *Client) Delete(remotePath string) error {
+func (c *Client) Delete(fileID string) error {
 	// TODO: 实现文件删除逻辑
 	return fmt.Errorf("删除功能尚未实现")
 }

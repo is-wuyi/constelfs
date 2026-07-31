@@ -16,6 +16,7 @@ func main() {
 	}
 
 	configPath := flag.String("config", "config/client.yaml", "配置文件路径")
+	replicas := flag.Int("replicas", 3, "副本数量")
 	flag.Parse()
 
 	// 加载配置
@@ -35,22 +36,25 @@ func main() {
 	switch command {
 	case "upload":
 		if len(os.Args) < 3 {
-			fmt.Println("用法: constelfs-client upload <文件路径>")
+			fmt.Println("用法: constelfs-client upload <文件路径> [--replicas=3]")
 			os.Exit(1)
 		}
-		if err := c.Upload(os.Args[2]); err != nil {
+		result, err := c.Upload(os.Args[2], *replicas)
+		if err != nil {
 			log.Fatalf("上传失败: %v", err)
 		}
-		fmt.Println("上传成功")
+		fmt.Printf("上传成功! 文件ID: %s\n", result.FileID)
+
 	case "download":
 		if len(os.Args) < 4 {
-			fmt.Println("用法: constelfs-client download <远程路径> <本地路径>")
+			fmt.Println("用法: constelfs-client download <文件ID> <本地路径>")
 			os.Exit(1)
 		}
 		if err := c.Download(os.Args[2], os.Args[3]); err != nil {
 			log.Fatalf("下载失败: %v", err)
 		}
 		fmt.Println("下载成功")
+
 	case "list":
 		path := "/"
 		if len(os.Args) > 2 {
@@ -63,15 +67,17 @@ func main() {
 		for _, f := range files {
 			fmt.Printf("%s\t%d\t%s\n", f.Mode, f.Size, f.Name)
 		}
+
 	case "delete":
 		if len(os.Args) < 3 {
-			fmt.Println("用法: constelfs-client delete <文件路径>")
+			fmt.Println("用法: constelfs-client delete <文件ID>")
 			os.Exit(1)
 		}
 		if err := c.Delete(os.Args[2]); err != nil {
 			log.Fatalf("删除失败: %v", err)
 		}
 		fmt.Println("删除成功")
+
 	case "nodes":
 		nodes, err := c.ListNodes()
 		if err != nil {
@@ -80,6 +86,7 @@ func main() {
 		for _, n := range nodes {
 			fmt.Printf("%s\t%s\t%s\n", n.NodeID, n.IPAddress, n.Status)
 		}
+
 	default:
 		fmt.Printf("未知命令: %s\n", command)
 		printUsage()
@@ -91,9 +98,9 @@ func printUsage() {
 	fmt.Println("ConstelFS 客户端")
 	fmt.Println()
 	fmt.Println("用法:")
-	fmt.Println("  constelfs-client upload <文件路径>")
-	fmt.Println("  constelfs-client download <远程路径> <本地路径>")
+	fmt.Println("  constelfs-client upload <文件路径> [--replicas=3]")
+	fmt.Println("  constelfs-client download <文件ID> <本地路径>")
 	fmt.Println("  constelfs-client list [目录路径]")
-	fmt.Println("  constelfs-client delete <文件路径>")
+	fmt.Println("  constelfs-client delete <文件ID>")
 	fmt.Println("  constelfs-client nodes")
 }

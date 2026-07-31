@@ -13,17 +13,25 @@ import (
 type Agent struct {
 	config     *Config
 	httpClient *http.Client
+	storage    *StorageEngine
 	stopCh     chan struct{}
 }
 
 // New 创建新的节点代理
 func New(config *Config) (*Agent, error) {
+	// 创建存储引擎
+	storage := NewStorageEngine(config)
+
+	// 初始化存储目录
+	if err := storage.Init(); err != nil {
+		return nil, fmt.Errorf("初始化存储失败: %w", err)
+	}
+
 	return &Agent{
-		config: config,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		stopCh: make(chan struct{}),
+		config:     config,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		storage:    storage,
+		stopCh:     make(chan struct{}),
 	}, nil
 }
 
@@ -37,7 +45,7 @@ func (a *Agent) Start() error {
 	// 启动心跳
 	go a.heartbeatLoop()
 
-	// 启动HTTP服务（用于接收中心服务器的指令）
+	// 启动HTTP服务
 	go a.startHTTPServer()
 
 	return nil
@@ -50,7 +58,6 @@ func (a *Agent) Stop() {
 
 // register 注册到中心服务器
 func (a *Agent) register() error {
-	// 获取系统信息
 	totalDisk := a.getTotalDiskSpace()
 
 	req := map[string]interface{}{
@@ -58,9 +65,9 @@ func (a *Agent) register() error {
 		"ip_address":       a.config.AdvertiseIP,
 		"port":             a.config.Port,
 		"total_disk_space": totalDisk,
-		"cpu_usage":        0,
-		"memory_usage":     0,
-		"disk_usage":       0,
+		"cpu_usage":        a.getCPUUsage(),
+		"memory_usage":     a.getMemoryUsage(),
+		"disk_usage":       a.getDiskUsage(),
 	}
 
 	data, _ := json.Marshal(req)
@@ -99,11 +106,14 @@ func (a *Agent) heartbeatLoop() {
 
 // sendHeartbeat 发送心跳
 func (a *Agent) sendHeartbeat() error {
+	// 获取存储信息
+	storageInfo := a.storage.GetStorageInfo()
+
 	req := map[string]interface{}{
 		"cpu_usage":    a.getCPUUsage(),
 		"memory_usage": a.getMemoryUsage(),
 		"disk_usage":   a.getDiskUsage(),
-		"used_space":   a.getUsedSpace(),
+		"used_space":   storageInfo["total_size"],
 		"status":       "online",
 	}
 
@@ -122,9 +132,23 @@ func (a *Agent) sendHeartbeat() error {
 // startHTTPServer 启动HTTP服务
 func (a *Agent) startHTTPServer() {
 	mux := http.NewServeMux()
+
+	// 健康检查
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"status":"ok"}`)
+	})
+
+	// 存储API
+	mux.HandleFunc("/api/v1/upload", a.storage.HandleUpload)
+	mux.HandleFunc("/api/v1/download", a.storage.HandleDownload)
+	mux.HandleFunc("/api/v1/delete", a.storage.HandleDelete)
+
+	// 存储信息
+	mux.HandleFunc("/api/v1/storage", func(w http.ResponseWriter, r *http.Request) {
+		info := a.storage.GetStorageInfo()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(info)
 	})
 
 	addr := fmt.Sprintf(":%d", a.config.Port)
@@ -144,11 +168,5 @@ func (a *Agent) getCPUUsage() float64 {
 // getMemoryUsage 获取内存使用率
 func (a *Agent) getMemoryUsage() float64 {
 	// TODO: 获取实际内存使用率
-	return 0
-}
-
-// getUsedSpace 获取已使用空间
-func (a *Agent) getUsedSpace() int64 {
-	// TODO: 获取ConstelFS实际使用的空间
 	return 0
 }
