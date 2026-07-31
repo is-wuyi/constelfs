@@ -2,10 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -123,6 +123,8 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		s.getNode(w, r, nodeID)
+	case len(parts) == 1 && r.Method == http.MethodDelete:
+		s.deleteNode(w, r, nodeID)
 	case len(parts) == 2 && parts[1] == "configure" && r.Method == http.MethodPost:
 		s.configureNode(w, r, nodeID)
 	case len(parts) == 2 && parts[1] == "heartbeat" && r.Method == http.MethodPost:
@@ -184,6 +186,34 @@ func (s *Server) getNode(w http.ResponseWriter, r *http.Request, nodeID string) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(node)
+}
+
+// deleteNode 删除节点
+func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, nodeID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	node, exists := s.nodes[nodeID]
+	if !exists {
+		http.Error(w, `{"error":"Node not found"}`, http.StatusNotFound)
+		return
+	}
+
+	// 检查节点状态
+	if node.Status == NodeStatusOnline {
+		http.Error(w, `{"error":"Cannot delete online node, please stop it first"}`, http.StatusBadRequest)
+		return
+	}
+
+	// 删除节点
+	delete(s.nodes, nodeID)
+	log.Printf("节点已删除: %s", nodeID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Node %s deleted", nodeID),
+	})
 }
 
 // registerNode 注册新节点
