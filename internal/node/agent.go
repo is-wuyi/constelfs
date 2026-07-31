@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"time"
 )
 
@@ -51,8 +50,6 @@ func (a *Agent) Stop() {
 
 // register 注册到中心服务器
 func (a *Agent) register() error {
-	hostname, _ := os.Hostname()
-
 	// 获取系统信息
 	totalDisk := a.getTotalDiskSpace()
 

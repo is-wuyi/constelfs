@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net"
@@ -85,6 +84,7 @@ func (s *Server) StartGRPC(addr string) error {
 	// pb.RegisterNodeServiceServer(s.grpc, s)
 	// pb.RegisterStorageServiceServer(s.grpc, s)
 
+	log.Printf("gRPC服务启动在 %s", addr)
 	return s.grpc.Serve(lis)
 }
 

@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -13,30 +12,30 @@ import (
 type NodeStatus string
 
 const (
-	NodeStatusRegistered NodeStatus = "registered"
-	NodeStatusConfigured NodeStatus = "configured"
-	NodeStatusOnline     NodeStatus = "online"
-	NodeStatusOffline    NodeStatus = "offline"
+	NodeStatusRegistered  NodeStatus = "registered"
+	NodeStatusConfigured  NodeStatus = "configured"
+	NodeStatusOnline      NodeStatus = "online"
+	NodeStatusOffline     NodeStatus = "offline"
 	NodeStatusMaintenance NodeStatus = "maintenance"
 )
 
 // Node 存储节点信息
 type Node struct {
-	ID              int64      `json:"id"`
-	NodeID          string     `json:"node_id"`
-	IPAddress       string     `json:"ip_address"`
-	Port            int        `json:"port"`
-	Status          NodeStatus `json:"status"`
-	StoragePath     string     `json:"storage_path"`
-	TotalDiskSpace  int64      `json:"total_disk_space"`
-	AllocatedSpace  int64      `json:"allocated_space"`
-	UsedSpace       int64      `json:"used_space"`
-	CPUUsage        float64    `json:"cpu_usage"`
-	MemoryUsage     float64    `json:"memory_usage"`
-	DiskUsage       float64    `json:"disk_usage"`
-	LastHeartbeat   time.Time  `json:"last_heartbeat"`
-	ConfiguredAt    time.Time  `json:"configured_at"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID             int64      `json:"id"`
+	NodeID         string     `json:"node_id"`
+	IPAddress      string     `json:"ip_address"`
+	Port           int        `json:"port"`
+	Status         NodeStatus `json:"status"`
+	StoragePath    string     `json:"storage_path"`
+	TotalDiskSpace int64      `json:"total_disk_space"`
+	AllocatedSpace int64      `json:"allocated_space"`
+	UsedSpace      int64      `json:"used_space"`
+	CPUUsage       float64    `json:"cpu_usage"`
+	MemoryUsage    float64    `json:"memory_usage"`
+	DiskUsage      float64    `json:"disk_usage"`
+	LastHeartbeat  time.Time  `json:"last_heartbeat"`
+	ConfiguredAt   time.Time  `json:"configured_at"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // RegisterRequest 节点注册请求
