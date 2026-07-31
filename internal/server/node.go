@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,9 @@ const (
 	NodeStatusOffline     NodeStatus = "offline"
 	NodeStatusMaintenance NodeStatus = "maintenance"
 )
+
+// 节点心跳超时时间（秒）
+const HeartbeatTimeout = 90 // 3次心跳间隔（30秒 * 3）
 
 // Node 存储节点信息
 type Node struct {
@@ -64,6 +68,39 @@ type HeartbeatRequest struct {
 	Status      string  `json:"status"`
 }
 
+// StartNodeChecker 启动节点状态检查器
+func (s *Server) StartNodeChecker() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			s.checkNodeStatus()
+		}
+	}()
+	log.Println("节点状态检查器已启动")
+}
+
+// checkNodeStatus 检查节点状态
+func (s *Server) checkNodeStatus() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	for _, node := range s.nodes {
+		// 只检查已配置或在线的节点
+		if node.Status == NodeStatusConfigured || node.Status == NodeStatusOnline {
+			elapsed := now.Sub(node.LastHeartbeat).Seconds()
+			if elapsed > HeartbeatTimeout {
+				if node.Status != NodeStatusOffline {
+					log.Printf("节点 %s 心跳超时 (%.0f秒)，标记为离线", node.NodeID, elapsed)
+					node.Status = NodeStatusOffline
+				}
+			}
+		}
+	}
+}
+
 // handleNodes 处理节点列表请求
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -100,6 +137,9 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// 先检查一次状态
+	s.checkNodeStatusWithLock()
+
 	nodes := make([]*Node, 0, len(s.nodes))
 	for _, node := range s.nodes {
 		nodes = append(nodes, node)
@@ -112,6 +152,22 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// checkNodeStatusWithLock 在已加锁的情况下检查状态
+func (s *Server) checkNodeStatusWithLock() {
+	now := time.Now()
+	for _, node := range s.nodes {
+		if node.Status == NodeStatusConfigured || node.Status == NodeStatusOnline {
+			elapsed := now.Sub(node.LastHeartbeat).Seconds()
+			if elapsed > HeartbeatTimeout {
+				if node.Status != NodeStatusOffline {
+					log.Printf("节点 %s 心跳超时 (%.0f秒)，标记为离线", node.NodeID, elapsed)
+					node.Status = NodeStatusOffline
+				}
+			}
+		}
+	}
+}
+
 // getNode 获取单个节点
 func (s *Server) getNode(w http.ResponseWriter, r *http.Request, nodeID string) {
 	s.mu.RLock()
@@ -122,6 +178,9 @@ func (s *Server) getNode(w http.ResponseWriter, r *http.Request, nodeID string) 
 		http.Error(w, "Node not found", http.StatusNotFound)
 		return
 	}
+
+	// 检查状态
+	s.checkNodeStatusWithLock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(node)
@@ -236,8 +295,10 @@ func (s *Server) heartbeatNode(w http.ResponseWriter, r *http.Request, nodeID st
 	node.UsedSpace = req.UsedSpace
 	node.LastHeartbeat = time.Now()
 
-	if node.Status == NodeStatusConfigured || node.Status == NodeStatusOnline {
+	// 只有已配置的节点才能变为在线
+	if node.Status == NodeStatusConfigured || node.Status == NodeStatusOffline {
 		node.Status = NodeStatusOnline
+		log.Printf("节点 %s 上线", nodeID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

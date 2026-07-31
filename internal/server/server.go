@@ -52,6 +52,9 @@ func New(config *Config) (*Server, error) {
 		nodes:  make(map[string]*Node),
 	}
 
+	// 启动节点状态检查器
+	s.StartNodeChecker()
+
 	return s, nil
 }
 
