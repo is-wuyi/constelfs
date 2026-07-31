@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"syscall"
 	"time"
 )
 
@@ -137,8 +138,12 @@ func (a *Agent) startHTTPServer() {
 
 // getTotalDiskSpace 获取总磁盘空间
 func (a *Agent) getTotalDiskSpace() int64 {
-	// TODO: 获取实际磁盘空间
-	return 1024 * 1024 * 1024 * 100 // 100GB
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(a.config.StoragePath, &stat); err != nil {
+		log.Printf("获取磁盘空间失败: %v", err)
+		return 1024 * 1024 * 1024 * 100 // 默认100GB
+	}
+	return int64(stat.Blocks * uint64(stat.Bsize))
 }
 
 // getCPUUsage 获取CPU使用率
@@ -155,12 +160,18 @@ func (a *Agent) getMemoryUsage() float64 {
 
 // getDiskUsage 获取磁盘使用率
 func (a *Agent) getDiskUsage() float64 {
-	// TODO: 获取实际磁盘使用率
-	return 0
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(a.config.StoragePath, &stat); err != nil {
+		return 0
+	}
+	total := stat.Blocks * uint64(stat.Bsize)
+	free := stat.Bavail * uint64(stat.Bsize)
+	used := total - free
+	return float64(used) / float64(total) * 100
 }
 
 // getUsedSpace 获取已使用空间
 func (a *Agent) getUsedSpace() int64 {
-	// TODO: 获取实际已使用空间
+	// TODO: 获取ConstelFS实际使用的空间
 	return 0
 }
