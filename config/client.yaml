@@ -1,0 +1,3 @@
+# ConstelFS 客户端配置
+server_addr: http://193.134.209.37:8080
+log_level: info

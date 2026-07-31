@@ -1,0 +1,8 @@
+# ConstelFS 存储节点配置
+node_id: node-001
+server_addr: http://193.134.209.37:8080
+advertise_ip: 0.0.0.0
+port: 8081
+storage_path: /data/constelfs
+heartbeat_interval: 30
+log_level: info

@@ -1,0 +1,5 @@
+# ConstelFS 中心服务器配置
+http_port: 8080
+grpc_port: 9090
+database_path: /var/lib/constelfs/constelfs.db
+log_level: info
