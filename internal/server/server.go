@@ -20,6 +20,7 @@ type Server struct {
 	scheduler *Scheduler
 	storage   *StorageManager
 	fileMgr   *FileManager
+	encMgr    *EncryptionManager
 	mu        sync.RWMutex
 
 	// 节点管理
@@ -50,11 +51,12 @@ func New(config *Config) (*Server, error) {
 		return nil, err
 	}
 
-	// 创建调度器、存储管理器、版本管理器、文件管理器
+	// 创建调度器、存储管理器、版本管理器、文件管理器、加密管理器
 	scheduler := NewScheduler()
 	storage := NewStorageManager(scheduler)
 	versionMgr := NewVersionManager(storage)
 	fileMgr := NewFileManager(versionMgr, storage)
+	encMgr := NewEncryptionManager()
 
 	s := &Server{
 		config:    config,
@@ -62,6 +64,7 @@ func New(config *Config) (*Server, error) {
 		scheduler: scheduler,
 		storage:   storage,
 		fileMgr:   fileMgr,
+		encMgr:    encMgr,
 		nodes:     make(map[string]*Node),
 	}
 
