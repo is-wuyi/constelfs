@@ -155,3 +155,21 @@ func (sm *StorageManager) GetChunksByFileID(fileID string) []*ChunkInfo {
 
 	return chunks
 }
+
+// DeleteChunk 删除分片
+func (sm *StorageManager) DeleteChunk(chunkID string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	chunk, exists := sm.chunks[chunkID]
+	if !exists {
+		return fmt.Errorf("分片不存在: %s", chunkID)
+	}
+
+	// 删除分片记录
+	delete(sm.chunks, chunkID)
+
+	log.Printf("删除分片: %s, 节点=%v", chunkID, chunk.Replicas)
+
+	return nil
+}

@@ -19,6 +19,7 @@ type Server struct {
 	grpc      *grpc.Server
 	scheduler *Scheduler
 	storage   *StorageManager
+	fileMgr   *FileManager
 	mu        sync.RWMutex
 
 	// 节点管理
@@ -49,15 +50,18 @@ func New(config *Config) (*Server, error) {
 		return nil, err
 	}
 
-	// 创建调度器和存储管理器
+	// 创建调度器、存储管理器、版本管理器、文件管理器
 	scheduler := NewScheduler()
 	storage := NewStorageManager(scheduler)
+	versionMgr := NewVersionManager(storage)
+	fileMgr := NewFileManager(versionMgr, storage)
 
 	s := &Server{
 		config:    config,
 		db:        db,
 		scheduler: scheduler,
 		storage:   storage,
+		fileMgr:   fileMgr,
 		nodes:     make(map[string]*Node),
 	}
 
@@ -74,8 +78,8 @@ func (s *Server) Router() http.Handler {
 	// API路由
 	mux.HandleFunc("/api/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/api/v1/nodes/", s.handleNode)
-	mux.HandleFunc("/api/v1/files", s.handleFiles)
-	mux.HandleFunc("/api/v1/files/", s.handleFile)
+	mux.HandleFunc("/api/v1/files", s.fileMgr.HandleFiles)
+	mux.HandleFunc("/api/v1/files/", s.fileMgr.HandleFile)
 	mux.HandleFunc("/api/v1/write", s.handleWrite)
 	mux.HandleFunc("/api/v1/write/confirm", s.handleConfirmWrite)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
