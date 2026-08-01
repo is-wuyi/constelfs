@@ -2,6 +2,7 @@ package node
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -167,9 +168,9 @@ func (se *StorageEngine) HandleReplicate(w http.ResponseWriter, r *http.Request)
 	// 返回结果
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":        successCount > 0,
-		"success_count":  successCount,
-		"total_count":    len(req.TargetNodes),
+		"success":       successCount > 0,
+		"success_count": successCount,
+		"total_count":   len(req.TargetNodes),
 	})
 }
 
