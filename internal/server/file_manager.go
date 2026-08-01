@@ -51,7 +51,7 @@ func (fm *FileManager) HandleFiles(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		fm.listFiles(w, r)
 	case http.MethodPost:
-		fm.uploadFile(w, r)
+		fm.createFileMeta(w, r)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -554,4 +554,79 @@ func calculateChunkSize(fileSize int64) int64 {
 	default:
 		return 128 * 1024 * 1024
 	}
+}
+
+
+// createFileMeta 创建文件元数据（不包含文件内容）
+func (fm *FileManager) createFileMeta(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		FileID   string   `json:"file_id"`
+		FileName string   `json:"file_name"`
+		FilePath string   `json:"file_path"`
+		FileSize int64    `json:"file_size"`
+		ChunkIDs []string `json:"chunk_ids"`
+	}
+	
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.FileID == "" || req.FileName == "" {
+		http.Error(w, "file_id and file_name are required", http.StatusBadRequest)
+		return
+	}
+
+	// 创建文件信息
+	file := &FileInfo{
+		FileID:      req.FileID,
+		FileName:    req.FileName,
+		FilePath:    req.FilePath,
+		Size:        req.FileSize,
+		MaxVersions: 3,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	fm.files[req.FileID] = file
+
+	// 获取分片所在的节点
+	var nodeIDs []string
+	for _, chunkID := range req.ChunkIDs {
+		if chunk, exists := fm.storage.chunks[chunkID]; exists {
+			nodeIDs = chunk.Replicas
+			break
+		}
+	}
+
+	// 创建版本
+	newVersion, err := fm.versionManager.CreateNewVersion(file, req.ChunkIDs, nodeIDs, req.FileSize, "")
+	if err != nil {
+		log.Printf("创建版本失败: %v", err)
+	} else {
+		fm.versions[req.FileID] = append(fm.versions[req.FileID], newVersion)
+	}
+
+	// 持久化
+	if fm.persist != nil {
+		fm.persist.SaveFile(file)
+		if newVersion != nil {
+			fm.persist.SaveVersion(req.FileID, newVersion)
+		}
+	}
+
+	log.Printf("文件元数据创建成功: %s, ID=%s, 大小=%d, 分片=%d", req.FileName, req.FileID, req.FileSize, len(req.ChunkIDs))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"file_id":   req.FileID,
+		"file_name": req.FileName,
+		"size":      req.FileSize,
+		"chunks":    len(req.ChunkIDs),
+	})
 }
