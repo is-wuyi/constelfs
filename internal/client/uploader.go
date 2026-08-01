@@ -75,6 +75,7 @@ func (u *ChunkUploader) Upload(filePath string, replicas int) (*UploadResult, er
 
 	// 逐个分片上传
 	var chunkIDs []string
+	var chunkHash string
 	for i := int64(0); i < chunkCount; i++ {
 		// 计算分片偏移和大小
 		offset := i * u.chunkSize
