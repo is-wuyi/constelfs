@@ -10,8 +10,16 @@ import (
 )
 
 func setupTestServer() *Server {
+	scheduler := NewScheduler()
+	storage := NewStorageManager(scheduler)
+	versionMgr := NewVersionManager(storage)
+	fileMgr := NewFileManager(versionMgr, storage, scheduler)
+	
 	return &Server{
-		nodes: make(map[string]*Node),
+		nodes:     make(map[string]*Node),
+		scheduler: scheduler,
+		storage:   storage,
+		fileMgr:   fileMgr,
 	}
 }
 
