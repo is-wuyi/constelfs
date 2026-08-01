@@ -361,7 +361,7 @@ func (fm *FileManager) uploadFile(w http.ResponseWriter, r *http.Request) {
 				ChunkID:  chunkID,
 				FileID:   fileID,
 				Size:     chunkSize,
-				NodeIDs:  allNodeIDs,
+				Replicas:  allNodeIDs,
 			})
 		}
 	}
