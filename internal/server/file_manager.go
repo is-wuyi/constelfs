@@ -1,6 +1,7 @@
 package server
 
 import (
+	"os"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -202,12 +203,24 @@ func (fm *FileManager) getFile(w http.ResponseWriter, r *http.Request, fileID st
 func (fm *FileManager) uploadFile(w http.ResponseWriter, r *http.Request) {
 	contentType := r.Header.Get("Content-Type")
 	
-	var fileData []byte
 	var fileName, filePath string
+	var tempFile *os.File
+	var fileSize int64
 	var err error
 	
+	// 创建临时文件用于流式处理
+	tempFile, err = os.CreateTemp("", "constelfs-upload-*")
+	if err != nil {
+		http.Error(w, "Create temp file failed", http.StatusInternalServerError)
+		return
+	}
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+	
+	var fileReader io.Reader
+	
 	if strings.HasPrefix(contentType, "multipart/form-data") {
-		r.ParseMultipartForm(64 << 20)
+		r.ParseMultipartForm(32 << 20) // 32MB 内存缓存，其余写入磁盘
 		file, header, err := r.FormFile("file")
 		if err != nil {
 			http.Error(w, "Parse form failed: "+err.Error(), http.StatusBadRequest)
@@ -220,29 +233,34 @@ func (fm *FileManager) uploadFile(w http.ResponseWriter, r *http.Request) {
 		if filePath == "" {
 			filePath = "/" + fileName
 		}
-		
-		fileData, err = io.ReadAll(file)
-		if err != nil {
-			http.Error(w, "Read file failed", http.StatusInternalServerError)
-			return
-		}
+		fileReader = file
 	} else {
 		fileName = r.Header.Get("X-File-Name")
 		filePath = r.Header.Get("X-File-Path")
 		if filePath == "" {
 			filePath = "/" + fileName
 		}
-		
-		fileData, err = io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Read body failed", http.StatusInternalServerError)
-			return
-		}
+		fileReader = r.Body
 	}
 	
 	if fileName == "" {
 		fileName = "unnamed"
 	}
+
+	// 流式写入临时文件并计算hash
+	hasher := sha256.New()
+	writer := io.MultiWriter(tempFile, hasher)
+	
+	fileSize, err = io.Copy(writer, fileReader)
+	if err != nil {
+		http.Error(w, "Read file failed", http.StatusInternalServerError)
+		return
+	}
+	
+	hashStr := fmt.Sprintf("%x", hasher.Sum(nil))
+	
+	// 回到文件开头
+	tempFile.Seek(0, 0)
 
 	replicas := 3
 	if r := r.URL.Query().Get("replicas"); r != "" {
@@ -252,27 +270,29 @@ func (fm *FileManager) uploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fileID := fmt.Sprintf("%s_%d", fileName, time.Now().UnixNano())
-	hash := sha256.Sum256(fileData)
-	hashStr := fmt.Sprintf("%x", hash)
-
-	chunkSize := calculateChunkSize(int64(len(fileData)))
-	chunkCount := (int64(len(fileData)) + chunkSize - 1) / chunkSize
+	chunkSize := calculateChunkSize(fileSize)
+	chunkCount := (fileSize + chunkSize - 1) / chunkSize
 	
 	var chunkIDs []string
 	var allNodeIDs []string
 	
+	// 流式分片处理
+	chunkBuf := make([]byte, chunkSize)
 	for i := int64(0); i < chunkCount; i++ {
-		offset := i * chunkSize
-		end := offset + chunkSize
-		if end > int64(len(fileData)) {
-			end = int64(len(fileData))
+		n, readErr := io.ReadFull(tempFile, chunkBuf)
+		if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+			http.Error(w, fmt.Sprintf("Read chunk %d failed: %s", i, readErr.Error()), http.StatusInternalServerError)
+			return
 		}
-		chunkData := fileData[offset:end]
+		if n == 0 {
+			break
+		}
+		chunkData := chunkBuf[:n]
 		
 		writeReq := &WriteRequest{
 			FileID:   fileID,
 			FileName: fmt.Sprintf("chunk_%d", i),
-			FileSize: int64(len(chunkData)),
+			FileSize: int64(n),
 			Replicas: replicas,
 		}
 		
@@ -298,53 +318,64 @@ func (fm *FileManager) uploadFile(w http.ResponseWriter, r *http.Request) {
 			
 			chunkHash := sha256.Sum256(chunkData)
 			if err := fm.storage.ConfirmWrite(chunkID, fmt.Sprintf("%x", chunkHash)); err != nil {
-				log.Printf("确认写入失败: %v", err)
+				http.Error(w, "Confirm write failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			
+			for _, addr := range writeResp.NodeAddrs[1:] {
+				allNodeIDs = append(allNodeIDs, addr)
 			}
 		}
 		
-		if len(writeResp.Nodes) > 0 {
-			allNodeIDs = append(allNodeIDs, writeResp.Nodes[0])
-		}
-		
-		log.Printf("分片 %d/%d 上传完成: %s", i+1, chunkCount, chunkID)
-	}
-	
-	file := &FileInfo{
-		FileID:      fileID,
-		FileName:    fileName,
-		FilePath:    filePath,
-		MaxVersions: 3,
-		Size:        int64(len(fileData)),
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
-	fm.files[fileID] = file
-	
-	newVersion, err := fm.versionManager.CreateNewVersion(file, chunkIDs, allNodeIDs, int64(len(fileData)), hashStr)
-	if err != nil {
-		log.Printf("创建版本失败: %v", err)
-	} else {
-		fm.versions[fileID] = append(fm.versions[fileID], newVersion)
+		log.Printf("分片 %d/%d 上传完成", i+1, chunkCount)
 	}
 
-	// 持久化
+	// 创建版本
+	file := fm.files[fileID]
+	if file == nil {
+		file = &FileInfo{
+			FileID:      fileID,
+			FileName:    fileName,
+			FilePath:    filePath,
+			Size:        fileSize,
+			MaxVersions: 3,
+			CreatedAt:   time.Now(),
+		}
+		fm.files[fileID] = file
+	}
+
+	newVersion, err := fm.versionManager.CreateNewVersion(file, chunkIDs, allNodeIDs, fileSize, hashStr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fm.versions[fileID] = append(fm.versions[fileID], newVersion)
+	fm.versions[fileID], _ = fm.versionManager.CleanupOldVersions(file, fm.versions[fileID])
+
 	if fm.persist != nil {
 		fm.persist.SaveFile(file)
-		if newVersion != nil {
-			fm.persist.SaveVersion(fileID, newVersion)
+		fm.persist.SaveVersion(fileID, newVersion)
+		for _, chunkID := range chunkIDs {
+			fm.persist.SaveChunk(&ChunkInfo{
+				ChunkID:  chunkID,
+				FileID:   fileID,
+				Size:     chunkSize,
+				NodeIDs:  allNodeIDs,
+			})
 		}
 	}
 
-	log.Printf("文件上传完成: %s, ID=%s, 大小=%d, 分片=%d", fileName, fileID, len(fileData), chunkCount)
+	log.Printf("文件上传完成: %s, ID=%s, 大小=%d, 分片=%d", fileName, fileID, fileSize, len(chunkIDs))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":   true,
-		"file_id":   fileID,
-		"file_name": fileName,
-		"size":      len(fileData),
-		"chunks":    chunkCount,
-		"hash":      hashStr,
+		"success":    true,
+		"file_id":    fileID,
+		"file_name":  fileName,
+		"file_size":  fileSize,
+		"chunk_count": len(chunkIDs),
+		"version":    newVersion,
 	})
 }
 
