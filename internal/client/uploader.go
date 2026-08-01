@@ -104,11 +104,59 @@ func (u *ChunkUploader) Upload(filePath string, replicas int) (*UploadResult, er
 		fmt.Printf("分片 %d/%d 上传成功\n", i+1, chunkCount)
 	}
 
+	// 4. 创建版本
+	if err := u.createVersion(fileID, filepath.Base(filePath), filePath, fileInfo.Size(), hashStr, chunkIDs, replicas); err != nil {
+		return nil, fmt.Errorf("创建版本失败: %w", err)
+	}
+
 	return &UploadResult{
 		Success: true,
 		FileID:  fileID,
 		Chunks:  chunkIDs,
 	}, nil
+}
+
+
+// createVersion 创建版本
+func (u *ChunkUploader) createVersion(fileID, fileName, filePath string, fileSize int64, hash string, chunkIDs []string, replicas int) error {
+	// 获取节点列表（从第一个分片的响应中获取）
+	// 这里简化处理，使用空列表
+	nodeIDs := []string{}
+	
+	req := map[string]interface{}{
+		"file_id":   fileID,
+		"file_name": fileName,
+		"file_path": filePath,
+		"file_size": fileSize,
+		"hash":      hash,
+		"chunk_ids": chunkIDs,
+		"node_ids":  nodeIDs,
+	}
+	
+	reqBody, _ := json.Marshal(req)
+	resp, err := u.httpClient.Post(
+		fmt.Sprintf("%s/api/v1/version/create", u.config.ServerAddr),
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return fmt.Errorf("请求创建版本失败: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	var result struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("解析响应失败: %w", err)
+	}
+	
+	if !result.Success {
+		return fmt.Errorf("创建版本失败: %s", result.Error)
+	}
+	
+	return nil
 }
 
 // uploadChunk 上传单个分片

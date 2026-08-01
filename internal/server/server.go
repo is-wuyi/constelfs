@@ -84,6 +84,7 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/v1/download/", s.fileMgr.HandleDownload)
 	mux.HandleFunc("/api/v1/write", s.handleWrite)
 	mux.HandleFunc("/api/v1/write/confirm", s.handleConfirmWrite)
+	mux.HandleFunc("/api/v1/version/create", s.fileMgr.HandleCreateVersion)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 
 	// 静态文件（Web管理界面）
