@@ -113,12 +113,34 @@ func (fm *FileManager) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// calculateChunkSize 计算分片大小
+func calculateChunkSize(fileSize int64) int64 {
+	const (
+		ChunkSize10MB  = 10 * 1024 * 1024
+		ChunkSize100MB = 100 * 1024 * 1024
+		ChunkSize1GB   = 1024 * 1024 * 1024
+		ChunkSize10GB  = 10 * 1024 * 1024 * 1024
+	)
+	
+	switch {
+	case fileSize < ChunkSize10MB:
+		return fileSize
+	case fileSize < ChunkSize100MB:
+		return 4 * 1024 * 1024
+	case fileSize < ChunkSize1GB:
+		return 16 * 1024 * 1024
+	case fileSize < ChunkSize10GB:
+		return 64 * 1024 * 1024
+	default:
+		return 128 * 1024 * 1024
+	}
+}
+
 // uploadChunks 上传分片到存储节点
 func (fm *FileManager) uploadChunks(fileID string, data []byte, replicas int) ([]string, []string, error) {
 	// 1. 将数据分片
-	chunker := &FileChunker{FileSize: int64(len(data))}
-	chunkSize := chunker.GetChunkSize()
-	chunkCount := chunker.GetChunkCount()
+	chunkSize := calculateChunkSize(int64(len(data)))
+	chunkCount := (int64(len(data)) + chunkSize - 1) / chunkSize
 
 	chunkIDs := make([]string, 0, chunkCount)
 	nodeIDs := make([]string, 0, replicas)
