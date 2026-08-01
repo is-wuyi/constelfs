@@ -1,11 +1,15 @@
 package server
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // FileManager 文件管理器
@@ -49,7 +53,6 @@ func (fm *FileManager) HandleFiles(w http.ResponseWriter, r *http.Request) {
 
 // HandleFile 处理单个文件请求
 func (fm *FileManager) HandleFile(w http.ResponseWriter, r *http.Request) {
-	// 从URL提取file_id和后续路径
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
 	parts := strings.Split(path, "/")
 	
@@ -60,7 +63,6 @@ func (fm *FileManager) HandleFile(w http.ResponseWriter, r *http.Request) {
 	
 	fileID := parts[0]
 	
-	// 处理不同的路由
 	switch {
 	// GET /api/v1/files/:id - 获取文件详情
 	case len(parts) == 1 && r.Method == http.MethodGet:
@@ -101,6 +103,73 @@ func (fm *FileManager) HandleFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandleUpload 处理上传（兼容旧路由）
+func (fm *FileManager) HandleUpload(w http.ResponseWriter, r *http.Request) {
+	fm.uploadFile(w, r)
+}
+
+// HandleDownload 处理下载（兼容旧路由）
+func (fm *FileManager) HandleDownload(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/download/")
+	fm.downloadFile(w, r, path, 0)
+}
+
+// HandleCreateVersion 处理版本创建
+func (fm *FileManager) HandleCreateVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		FileID   string   `json:"file_id"`
+		FileName string   `json:"file_name"`
+		FilePath string   `json:"file_path"`
+		FileSize int64    `json:"file_size"`
+		Hash     string   `json:"hash"`
+		ChunkIDs []string `json:"chunk_ids"`
+		NodeIDs  []string `json:"node_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// 查找或创建文件记录
+	file, exists := fm.files[req.FileID]
+	if !exists {
+		file = &FileInfo{
+			FileID:      req.FileID,
+			FileName:    req.FileName,
+			FilePath:    req.FilePath,
+			MaxVersions: 3,
+			CreatedAt:   time.Now(),
+		}
+		fm.files[req.FileID] = file
+	}
+
+	// 创建新版本
+	newVersion, err := fm.versionManager.CreateNewVersion(file, req.ChunkIDs, req.NodeIDs, req.FileSize, req.Hash)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 添加版本
+	fm.versions[req.FileID] = append(fm.versions[req.FileID], newVersion)
+
+	// 清理旧版本
+	fm.versions[req.FileID], _ = fm.versionManager.CleanupOldVersions(file, fm.versions[req.FileID])
+
+	log.Printf("版本创建成功: 文件=%s, 版本=%d", req.FileID, newVersion.Version)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"version": newVersion,
+	})
+}
+
 // listFiles 列出文件
 func (fm *FileManager) listFiles(w http.ResponseWriter, r *http.Request) {
 	dirPath := r.URL.Query().Get("dir")
@@ -108,10 +177,13 @@ func (fm *FileManager) listFiles(w http.ResponseWriter, r *http.Request) {
 		dirPath = "/"
 	}
 
-	// 获取指定目录下的文件
 	var files []*FileInfo
 	for _, file := range fm.files {
-		if strings.HasPrefix(file.FilePath, dirPath) {
+		// 简单的目录匹配
+		if dirPath == "/" {
+			// 根目录下显示所有文件
+			files = append(files, file)
+		} else if strings.HasPrefix(file.FilePath, dirPath) {
 			files = append(files, file)
 		}
 	}
@@ -132,7 +204,6 @@ func (fm *FileManager) getFile(w http.ResponseWriter, r *http.Request, fileID st
 		return
 	}
 
-	// 获取版本列表
 	versions := fm.versions[fileID]
 
 	w.Header().Set("Content-Type", "application/json")
@@ -142,13 +213,161 @@ func (fm *FileManager) getFile(w http.ResponseWriter, r *http.Request, fileID st
 	})
 }
 
-// uploadFile 上传文件
+// uploadFile 上传文件（端到端流程）
 func (fm *FileManager) uploadFile(w http.ResponseWriter, r *http.Request) {
-	// TODO: 实现文件上传
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+	// 解析multipart或raw body
+	contentType := r.Header.Get("Content-Type")
+	
+	var fileData []byte
+	var fileName, filePath string
+	var err error
+	
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		// multipart上传
+		r.ParseMultipartForm(64 << 20) // 64MB max memory
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "Parse form failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		
+		fileName = header.Filename
+		filePath = r.FormValue("path")
+		if filePath == "" {
+			filePath = "/" + fileName
+		}
+		
+		fileData, err = io.ReadAll(file)
+		if err != nil {
+			http.Error(w, "Read file failed", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Raw body上传 — 需要从header获取文件名
+		fileName = r.Header.Get("X-File-Name")
+		filePath = r.Header.Get("X-File-Path")
+		if filePath == "" {
+			filePath = "/" + fileName
+		}
+		
+		fileData, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Read body failed", http.StatusInternalServerError)
+			return
+		}
+	}
+	
+	if fileName == "" {
+		fileName = "unnamed"
+	}
+
+	replicas := 3
+	if r := r.URL.Query().Get("replicas"); r != "" {
+		if v, err := strconv.Atoi(r); err == nil && v > 0 {
+			replicas = v
+		}
+	}
+
+	// 生成文件ID
+	fileID := fmt.Sprintf("%s_%d", fileName, time.Now().UnixNano())
+	
+	// 计算整体hash
+	hash := sha256.Sum256(fileData)
+	hashStr := fmt.Sprintf("%x", hash)
+
+	// 分片
+	chunkSize := calculateChunkSize(int64(len(fileData)))
+	chunkCount := (int64(len(fileData)) + chunkSize - 1) / chunkSize
+	
+	var chunkIDs []string
+	var allNodeIDs []string
+	
+	for i := int64(0); i < chunkCount; i++ {
+		offset := i * chunkSize
+		end := offset + chunkSize
+		if end > int64(len(fileData)) {
+			end = int64(len(fileData))
+		}
+		chunkData := fileData[offset:end]
+		
+		// 向中心服务器请求写入（选择节点）
+		writeReq := &WriteRequest{
+			FileID:   fileID,
+			FileName: fmt.Sprintf("chunk_%d", i),
+			FileSize: int64(len(chunkData)),
+			Replicas: replicas,
+		}
+		
+		writeResp, err := fm.storage.PrepareWrite(&Server{nodes: fm.nodes, scheduler: fm.scheduler, storage: fm.storage}, writeReq)
+		if err != nil {
+			http.Error(w, "Prepare write failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !writeResp.Success {
+			http.Error(w, "Prepare write failed: "+writeResp.Error, http.StatusInternalServerError)
+			return
+		}
+		
+		chunkID := writeResp.ChunkID
+		chunkIDs = append(chunkIDs, chunkID)
+		
+		// 上传分片到第一个节点
+		if len(writeResp.NodeAddrs) > 0 {
+			firstNodeAddr := writeResp.NodeAddrs[0]
+			if err := fm.storage.UploadToNode(firstNodeAddr, chunkID, chunkData); err != nil {
+				http.Error(w, fmt.Sprintf("Upload chunk %d to node failed: %s", i, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			
+			// 确认写入（会触发异步副本分发）
+			chunkHash := sha256.Sum256(chunkData)
+			if err := fm.storage.ConfirmWrite(chunkID, fmt.Sprintf("%x", chunkHash)); err != nil {
+				log.Printf("确认写入失败: %v", err)
+			}
+		}
+		
+		if len(writeResp.Nodes) > 0 {
+			allNodeIDs = append(allNodeIDs, writeResp.Nodes[0])
+		}
+		
+		log.Printf("分片 %d/%d 上传完成: %s", i+1, chunkCount, chunkID)
+	}
+	
+	// 创建文件记录
+	file := &FileInfo{
+		FileID:        fileID,
+		FileName:      fileName,
+		FilePath:      filePath,
+		MaxVersions:   3,
+		Size:          int64(len(fileData)),
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	fm.files[fileID] = file
+	
+	// 创建版本
+	newVersion, err := fm.versionManager.CreateNewVersion(file, chunkIDs, allNodeIDs, int64(len(fileData)), hashStr)
+	if err != nil {
+		log.Printf("创建版本失败: %v", err)
+	} else {
+		fm.versions[fileID] = append(fm.versions[fileID], newVersion)
+	}
+
+	log.Printf("文件上传完成: %s, ID=%s, 大小=%d, 分片=%d", fileName, fileID, len(fileData), chunkCount)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"file_id":   fileID,
+		"file_name": fileName,
+		"size":      len(fileData),
+		"chunks":    chunkCount,
+		"hash":      hashStr,
+	})
 }
 
-// downloadFile 下载文件
+// downloadFile 下载文件（端到端流程）
 func (fm *FileManager) downloadFile(w http.ResponseWriter, r *http.Request, fileID string, version int) {
 	file, exists := fm.files[fileID]
 	if !exists {
@@ -156,7 +375,6 @@ func (fm *FileManager) downloadFile(w http.ResponseWriter, r *http.Request, file
 		return
 	}
 
-	// 获取版本
 	versions := fm.versions[fileID]
 	if len(versions) == 0 {
 		http.Error(w, `{"error":"No versions available"}`, http.StatusNotFound)
@@ -164,7 +382,7 @@ func (fm *FileManager) downloadFile(w http.ResponseWriter, r *http.Request, file
 	}
 
 	var targetVersion *FileVersion
-	if version == 0 {
+	if version == 0 || version == file.LatestVersion {
 		// 最新版本
 		targetVersion = versions[len(versions)-1]
 	} else {
@@ -182,12 +400,22 @@ func (fm *FileManager) downloadFile(w http.ResponseWriter, r *http.Request, file
 		return
 	}
 
-	// TODO: 实现文件下载
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"file":    file,
-		"version": targetVersion,
-	})
+	// 从各分片节点下载数据并组装
+	var fileData []byte
+	for _, chunkID := range targetVersion.ChunkIDs {
+		data, err := fm.storage.DownloadFromNode(chunkID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Download chunk %s failed: %s", chunkID, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		fileData = append(fileData, data...)
+	}
+
+	// 返回文件数据
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", file.FileName))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(fileData)))
+	w.Write(fileData)
 }
 
 // rollbackFile 回滚文件
@@ -206,7 +434,6 @@ func (fm *FileManager) rollbackFile(w http.ResponseWriter, r *http.Request, file
 		return
 	}
 
-	// 查找目标版本
 	versions := fm.versions[fileID]
 	var targetVersion *FileVersion
 	for _, v := range versions {
@@ -221,17 +448,13 @@ func (fm *FileManager) rollbackFile(w http.ResponseWriter, r *http.Request, file
 		return
 	}
 
-	// 回滚
 	newVersion, err := fm.versionManager.RollbackToVersion(file, targetVersion)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 添加新版本
 	fm.versions[fileID] = append(fm.versions[fileID], newVersion)
-
-	// 清理旧版本
 	fm.versions[fileID], _ = fm.versionManager.CleanupOldVersions(file, fm.versions[fileID])
 
 	w.Header().Set("Content-Type", "application/json")
@@ -249,13 +472,14 @@ func (fm *FileManager) deleteFile(w http.ResponseWriter, r *http.Request, fileID
 		return
 	}
 
-	// 删除所有版本
+	// 删除所有版本的分片
 	versions := fm.versions[fileID]
 	for _, version := range versions {
-		fm.versionManager.DeleteVersion(version)
+		for _, chunkID := range version.ChunkIDs {
+			fm.storage.DeleteChunk(chunkID)
+		}
 	}
 
-	// 删除文件记录
 	delete(fm.files, fileID)
 	delete(fm.versions, fileID)
 
@@ -275,12 +499,14 @@ func (fm *FileManager) deleteVersion(w http.ResponseWriter, r *http.Request, fil
 		return
 	}
 
-	// 查找并删除版本
 	versions := fm.versions[fileID]
 	for i, v := range versions {
 		if v.Version == version {
-			// 删除版本
-			fm.versionManager.DeleteVersion(v)
+			// 删除该版本的分片
+			for _, chunkID := range v.ChunkIDs {
+				fm.storage.DeleteChunk(chunkID)
+			}
+			
 			fm.versions[fileID] = append(versions[:i], versions[i+1:]...)
 			file.VersionCount--
 			
@@ -295,4 +521,20 @@ func (fm *FileManager) deleteVersion(w http.ResponseWriter, r *http.Request, fil
 	}
 
 	http.Error(w, `{"error":"Version not found"}`, http.StatusNotFound)
+}
+
+// calculateChunkSize 根据文件大小计算分片大小
+func calculateChunkSize(fileSize int64) int64 {
+	switch {
+	case fileSize < 10*1024*1024:     // < 10MB: 不切片
+		return fileSize
+	case fileSize < 100*1024*1024:    // < 100MB: 4MB
+		return 4 * 1024 * 1024
+	case fileSize < 1024*1024*1024:   // < 1GB: 16MB
+		return 16 * 1024 * 1024
+	case fileSize < 10*1024*1024*1024: // < 10GB: 64MB
+		return 64 * 1024 * 1024
+	default:                           // >= 10GB: 128MB
+		return 128 * 1024 * 1024
+	}
 }

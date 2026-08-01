@@ -80,6 +80,12 @@ type SpeedTestResult struct {
 	TestTime      time.Time `json:"test_time"`
 }
 
+// syncNodes 同步节点信息到所有管理器
+func (s *Server) syncNodes() {
+	s.fileMgr.UpdateNodes(s.nodes)
+	s.storage.UpdateNodes(s.nodes)
+}
+
 // StartNodeChecker 启动节点状态检查器
 func (s *Server) StartNodeChecker() {
 	go func() {
@@ -100,7 +106,23 @@ func (s *Server) checkNodeStatus() {
 
 	now := time.Now()
 	for _, node := range s.nodes {
-		// 只检查已配置或在线的节点
+		if node.Status == NodeStatusConfigured || node.Status == NodeStatusOnline {
+			elapsed := now.Sub(node.LastHeartbeat).Seconds()
+			if elapsed > HeartbeatTimeout {
+				if node.Status != NodeStatusOffline {
+					log.Printf("节点 %s 心跳超时 (%.0f秒)，标记为离线", node.NodeID, elapsed)
+					node.Status = NodeStatusOffline
+				}
+			}
+		}
+	}
+	s.syncNodes()
+}
+
+// checkNodeStatusWithLock 检查节点状态（调用者已加锁）
+func (s *Server) checkNodeStatusWithLock() {
+	now := time.Now()
+	for _, node := range s.nodes {
 		if node.Status == NodeStatusConfigured || node.Status == NodeStatusOnline {
 			elapsed := now.Sub(node.LastHeartbeat).Seconds()
 			if elapsed > HeartbeatTimeout {
@@ -127,7 +149,6 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 // handleNode 处理单个节点请求
 func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
-	// 从URL提取node_id
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/nodes/")
 	parts := strings.SplitN(path, "/", 2)
 	nodeID := parts[0]
@@ -153,7 +174,6 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// 先检查一次状态
 	s.checkNodeStatusWithLock()
 
 	nodes := make([]*Node, 0, len(s.nodes))
@@ -168,22 +188,6 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// checkNodeStatusWithLock 在已加锁的情况下检查状态
-func (s *Server) checkNodeStatusWithLock() {
-	now := time.Now()
-	for _, node := range s.nodes {
-		if node.Status == NodeStatusConfigured || node.Status == NodeStatusOnline {
-			elapsed := now.Sub(node.LastHeartbeat).Seconds()
-			if elapsed > HeartbeatTimeout {
-				if node.Status != NodeStatusOffline {
-					log.Printf("节点 %s 心跳超时 (%.0f秒)，标记为离线", node.NodeID, elapsed)
-					node.Status = NodeStatusOffline
-				}
-			}
-		}
-	}
-}
-
 // getNode 获取单个节点
 func (s *Server) getNode(w http.ResponseWriter, r *http.Request, nodeID string) {
 	s.mu.RLock()
@@ -191,12 +195,9 @@ func (s *Server) getNode(w http.ResponseWriter, r *http.Request, nodeID string) 
 
 	node, exists := s.nodes[nodeID]
 	if !exists {
-		http.Error(w, "Node not found", http.StatusNotFound)
+		http.Error(w, `{"error":"Node not found"}`, http.StatusNotFound)
 		return
 	}
-
-	// 检查状态
-	s.checkNodeStatusWithLock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(node)
@@ -213,17 +214,13 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, nodeID strin
 		return
 	}
 
-	// 检查节点状态
 	if node.Status == NodeStatusOnline {
 		http.Error(w, `{"error":"Cannot delete online node, please stop it first"}`, http.StatusBadRequest)
 		return
 	}
 
-	// 删除节点
 	delete(s.nodes, nodeID)
-	
-	// 同步到FileManager
-	s.fileMgr.UpdateNodes(s.nodes)
+	s.syncNodes()
 	
 	log.Printf("节点已删除: %s", nodeID)
 
@@ -245,9 +242,7 @@ func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 检查是否已存在
 	if _, exists := s.nodes[req.NodeID]; exists {
-		// 更新现有节点
 		s.nodes[req.NodeID].IPAddress = req.IPAddress
 		s.nodes[req.NodeID].Port = req.Port
 		s.nodes[req.NodeID].TotalDiskSpace = req.TotalDiskSpace
@@ -256,7 +251,6 @@ func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 		s.nodes[req.NodeID].DiskUsage = req.DiskUsage
 		s.nodes[req.NodeID].LastHeartbeat = time.Now()
 	} else {
-		// 创建新节点
 		s.nodes[req.NodeID] = &Node{
 			NodeID:         req.NodeID,
 			IPAddress:      req.IPAddress,
@@ -266,14 +260,13 @@ func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 			CPUUsage:       req.CPUUsage,
 			MemoryUsage:    req.MemoryUsage,
 			DiskUsage:      req.DiskUsage,
-			OnlineRate:     1.0, // 默认在线率100%
+			OnlineRate:     1.0,
 			LastHeartbeat:  time.Now(),
 			CreatedAt:      time.Now(),
 		}
 	}
 
-	// 同步到FileManager
-	s.fileMgr.UpdateNodes(s.nodes)
+	s.syncNodes()
 
 	log.Printf("节点注册: %s (%s)", req.NodeID, req.IPAddress)
 
@@ -302,20 +295,17 @@ func (s *Server) configureNode(w http.ResponseWriter, r *http.Request, nodeID st
 		return
 	}
 
-	// 验证预分配空间
 	if req.AllocatedSpace > node.TotalDiskSpace {
 		http.Error(w, "Allocated space exceeds total disk space", http.StatusBadRequest)
 		return
 	}
 
-	// 更新配置
 	node.StoragePath = req.StoragePath
 	node.AllocatedSpace = req.AllocatedSpace
 	node.Status = NodeStatusConfigured
 	node.ConfiguredAt = time.Now()
 
-	// 同步到FileManager
-	s.fileMgr.UpdateNodes(s.nodes)
+	s.syncNodes()
 
 	log.Printf("节点配置: %s, 路径: %s, 空间: %dGB", nodeID, req.StoragePath, req.AllocatedSpace/1024/1024/1024)
 
@@ -343,21 +333,18 @@ func (s *Server) heartbeatNode(w http.ResponseWriter, r *http.Request, nodeID st
 		return
 	}
 
-	// 更新节点状态
 	node.CPUUsage = req.CPUUsage
 	node.MemoryUsage = req.MemoryUsage
 	node.DiskUsage = req.DiskUsage
 	node.UsedSpace = req.UsedSpace
 	node.LastHeartbeat = time.Now()
 
-	// 只有已配置的节点才能变为在线
 	if node.Status == NodeStatusConfigured || node.Status == NodeStatusOffline {
 		node.Status = NodeStatusOnline
 		log.Printf("节点 %s 上线", nodeID)
 	}
 
-	// 同步到FileManager
-	s.fileMgr.UpdateNodes(s.nodes)
+	s.syncNodes()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -383,13 +370,11 @@ func (s *Server) speedTestNode(w http.ResponseWriter, r *http.Request, nodeID st
 		return
 	}
 
-	// 更新测速结果
 	node.UploadSpeed = req.UploadSpeed
 	node.DownloadSpeed = req.DownloadSpeed
 	node.LastSpeedTest = time.Now()
 
-	// 同步到FileManager
-	s.fileMgr.UpdateNodes(s.nodes)
+	s.syncNodes()
 
 	log.Printf("节点 %s 测速完成: 上传=%.2f Mbps, 下载=%.2f Mbps", 
 		nodeID, req.UploadSpeed, req.DownloadSpeed)

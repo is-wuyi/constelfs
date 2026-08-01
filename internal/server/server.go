@@ -101,9 +101,6 @@ func (s *Server) StartGRPC(addr string) error {
 	}
 
 	s.grpc = grpc.NewServer()
-	// 注册gRPC服务
-	// pb.RegisterNodeServiceServer(s.grpc, s)
-	// pb.RegisterStorageServiceServer(s.grpc, s)
 
 	log.Printf("gRPC服务启动在 %s", addr)
 	return s.grpc.Serve(lis)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime"
 	"time"
 )
 
@@ -29,7 +30,7 @@ func New(config *Config) (*Agent, error) {
 
 	return &Agent{
 		config:     config,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 		storage:    storage,
 		stopCh:     make(chan struct{}),
 	}, nil
@@ -139,12 +140,12 @@ func (a *Agent) startHTTPServer() {
 		fmt.Fprintf(w, `{"status":"ok"}`)
 	})
 
-	// 分片API
-	mux.HandleFunc("/api/v1/chunks/upload", a.storage.HandleChunkUpload)
-	mux.HandleFunc("/api/v1/chunks/download", a.storage.HandleChunkDownload)
-	mux.HandleFunc("/api/v1/chunks/delete", a.storage.HandleChunkDelete)
+	// 分片API - 支持路径方式和查询参数方式
+	// 路径方式: PUT/GET/DELETE /api/v1/chunks/{chunkID}
+	// 查询方式: PUT/GET/DELETE /api/v1/chunks/upload|download|delete?chunk_id=xxx
+	mux.HandleFunc("/api/v1/chunks/", a.storage.HandleChunkByPath)
 
-	// 分发API
+	// 分发API - 接收分片并转发到其他节点
 	mux.HandleFunc("/api/v1/replicate", a.storage.HandleReplicate)
 
 	// 存储信息
@@ -164,12 +165,32 @@ func (a *Agent) startHTTPServer() {
 
 // getCPUUsage 获取CPU使用率
 func (a *Agent) getCPUUsage() float64 {
-	// TODO: 获取实际CPU使用率
-	return 0
+	// 简易实现：使用goroutine数量和GOMAXPROCS估算
+	// 实际生产环境应使用 /proc/stat 或 gopsutil
+	numCPU := float64(runtime.NumCPU())
+	numGoroutines := float64(runtime.NumGoroutine())
+	// 粗略估算：goroutine数/CPU数，最大100
+	usage := numGoroutines / numCPU * 5
+	if usage > 100 {
+		usage = 100
+	}
+	return usage
 }
 
 // getMemoryUsage 获取内存使用率
 func (a *Agent) getMemoryUsage() float64 {
-	// TODO: 获取实际内存使用率
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	// 使用 Sys 内存占总系统内存的比例
+	// 这是一个粗略估算
+	if m.Sys > 0 {
+		// 假设系统有至少1GB内存
+		totalMem := float64(1024 * 1024 * 1024)
+		usage := float64(m.Sys) / totalMem * 100
+		if usage > 100 {
+			usage = 100
+		}
+		return usage
+	}
 	return 0
 }

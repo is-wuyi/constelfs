@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
@@ -29,23 +30,11 @@ type ReplicationTask struct {
 	CompletedAt time.Time `json:"completed_at"`
 }
 
-// ReplicationRequest 分发请求
-type ReplicationRequest struct {
-	ChunkID     string   `json:"chunk_id"`
-	TargetNodes []string `json:"target_nodes"`
-}
-
-// ReplicationResponse 分发响应
-type ReplicationResponse struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-}
-
 // NewReplicationManager 创建分发管理器
 func NewReplicationManager() *ReplicationManager {
 	return &ReplicationManager{
 		nodes:  make(map[string]*Node),
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -57,72 +46,90 @@ func (rm *ReplicationManager) UpdateNodes(nodes map[string]*Node) {
 }
 
 // ReplicateChunk 分发分片到副本节点
-func (rm *ReplicationManager) ReplicateChunk(chunkID, sourceNode string, targetNodes []string) error {
+// 通过通知源节点，让源节点将分片推送到目标节点
+func (rm *ReplicationManager) ReplicateChunk(chunkID, sourceNodeID string, targetNodeIDs []string) error {
 	rm.mu.RLock()
-	defer rm.mu.RUnlock()
+	source, exists := rm.nodes[sourceNodeID]
+	rm.mu.RUnlock()
 	
-	// 获取源节点信息
-	source, exists := rm.nodes[sourceNode]
 	if !exists {
-		return fmt.Errorf("源节点不存在: %s", sourceNode)
+		return fmt.Errorf("源节点不存在: %s", sourceNodeID)
 	}
 	
-	// 构建分发请求
-	req := ReplicationRequest{
-		ChunkID:     chunkID,
-		TargetNodes: targetNodes,
+	// 将节点ID转换为地址列表
+	rm.mu.RLock()
+	var targetAddrs []string
+	for _, nodeID := range targetNodeIDs {
+		if node, ok := rm.nodes[nodeID]; ok {
+			targetAddrs = append(targetAddrs, fmt.Sprintf("%s:%d", node.IPAddress, node.Port))
+		}
+	}
+	rm.mu.RUnlock()
+	
+	if len(targetAddrs) == 0 {
+		return fmt.Errorf("没有可用的目标节点")
 	}
 	
-	reqBody, err := json.Marshal(req)
+	// 构建分发请求 — 通知源节点将分片推送到目标节点
+	reqBody := map[string]interface{}{
+		"chunk_id":     chunkID,
+		"target_nodes": targetAddrs,
+	}
+	
+	data, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("序列化请求失败: %w", err)
 	}
 	
 	// 发送分发请求到源节点
 	url := fmt.Sprintf("http://%s:%d/api/v1/replicate", source.IPAddress, source.Port)
-	resp, err := rm.client.Post(url, "application/json", bytes.NewBuffer(reqBody))
-	if err != nil {
-		return fmt.Errorf("发送分发请求失败: %w", err)
-	}
-	defer resp.Body.Close()
 	
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("分发请求失败: %s", resp.Status)
-	}
-	
-	// 解析响应
-	var replicationResp ReplicationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&replicationResp); err != nil {
-		return fmt.Errorf("解析响应失败: %w", err)
-	}
-	
-	if !replicationResp.Success {
-		return fmt.Errorf("分发失败: %s", replicationResp.Error)
-	}
-	
-	log.Printf("分片 %s 分发成功: %s -> %v", chunkID, sourceNode, targetNodes)
-	
-	return nil
-}
-
-// ReplicateWithRetry 带重试的分发
-func (rm *ReplicationManager) ReplicateWithRetry(chunkID, sourceNode string, targetNodes []string, maxRetries int) error {
+	// 重试3次
 	var lastErr error
-	
-	for retry := 0; retry <= maxRetries; retry++ {
+	for retry := 0; retry < 3; retry++ {
 		if retry > 0 {
-			log.Printf("重试分发: %s, 第%d次", chunkID, retry)
+			log.Printf("重试分发请求: %s, 第%d次", chunkID, retry)
 			time.Sleep(time.Duration(retry) * time.Second)
 		}
 		
-		err := rm.ReplicateChunk(chunkID, sourceNode, targetNodes)
-		if err == nil {
-			return nil
+		resp, err := rm.client.Post(url, "application/json", bytes.NewBuffer(data))
+		if err != nil {
+			lastErr = fmt.Errorf("发送分发请求失败: %w", err)
+			continue
 		}
 		
-		lastErr = err
-		log.Printf("分发失败: %v", err)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("分发请求返回 %d: %s", resp.StatusCode, string(body))
+			continue
+		}
+		
+		// 检查响应
+		var result struct {
+			Success      bool `json:"success"`
+			SuccessCount int  `json:"success_count"`
+			TotalCount   int  `json:"total_count"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			lastErr = fmt.Errorf("解析响应失败: %w", err)
+			continue
+		}
+		
+		if !result.Success {
+			lastErr = fmt.Errorf("分发失败: %d/%d成功", result.SuccessCount, result.TotalCount)
+			continue
+		}
+		
+		log.Printf("分片 %s 分发成功: %s -> %v (%d/%d)", chunkID, sourceNodeID, targetNodeIDs, result.SuccessCount, result.TotalCount)
+		return nil
 	}
 	
-	return fmt.Errorf("分发失败（已重试%d次）: %w", maxRetries, lastErr)
+	return fmt.Errorf("分发失败（已重试3次）: %w", lastErr)
+}
+
+// ReplicateWithRetry 带重试的分发（已内置在ReplicateChunk中）
+func (rm *ReplicationManager) ReplicateWithRetry(chunkID, sourceNode string, targetNodes []string, maxRetries int) error {
+	return rm.ReplicateChunk(chunkID, sourceNode, targetNodes)
 }

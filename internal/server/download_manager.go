@@ -16,31 +16,11 @@ type DownloadManager struct {
 	client   *http.Client
 }
 
-// DownloadSession 下载会话
-type DownloadSession struct {
-	SessionID string            `json:"session_id"`
-	FileID    string            `json:"file_id"`
-	Version   int               `json:"version"`
-	Chunks    []ChunkDownloadInfo `json:"chunks"`
-	Status    string            `json:"status"` // pending, downloading, completed, failed
-	CreatedAt time.Time         `json:"created_at"`
-}
-
-// ChunkDownloadInfo 分片下载信息
-type ChunkDownloadInfo struct {
-	Index    int      `json:"index"`
-	Size     int64    `json:"size"`
-	Hash     string   `json:"hash"`
-	Nodes    []string `json:"nodes"`
-	Status   string   `json:"status"` // pending, downloading, completed, failed
-	Data     []byte   `json:"-"`
-}
-
 // NewDownloadManager 创建下载管理器
 func NewDownloadManager() *DownloadManager {
 	return &DownloadManager{
 		nodes:  make(map[string]*Node),
-		client: &http.Client{Timeout: 60 * time.Second},
+		client: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -51,48 +31,17 @@ func (dm *DownloadManager) UpdateNodes(nodes map[string]*Node) {
 	dm.nodes = nodes
 }
 
-// CreateDownloadSession 创建下载会话
-func (dm *DownloadManager) CreateDownloadSession(fileID string, version int, chunks []ChunkInfo) (*DownloadSession, error) {
-	dm.mu.RLock()
-	defer dm.mu.RUnlock()
-	
-	sessionID := fmt.Sprintf("download_%d", time.Now().UnixNano())
-	
-	downloadChunks := make([]ChunkDownloadInfo, len(chunks))
-	for i, chunk := range chunks {
-		downloadChunks[i] = ChunkDownloadInfo{
-			Index:  chunk.Index,
-			Size:   chunk.Size,
-			Hash:   chunk.Hash,
-			Status: "pending",
-		}
-	}
-	
-	session := &DownloadSession{
-		SessionID: sessionID,
-		FileID:    fileID,
-		Version:   version,
-		Chunks:    downloadChunks,
-		Status:    "pending",
-		CreatedAt: time.Now(),
-	}
-	
-	log.Printf("创建下载会话: %s, 文件: %s, 版本: %d", sessionID, fileID, version)
-	
-	return session, nil
-}
-
-// DownloadChunk 下载分片
+// DownloadChunk 从指定节点下载分片
 func (dm *DownloadManager) DownloadChunk(chunkID string, nodeID string) ([]byte, error) {
 	dm.mu.RLock()
-	defer dm.mu.RUnlock()
-	
 	node, exists := dm.nodes[nodeID]
+	dm.mu.RUnlock()
+	
 	if !exists {
 		return nil, fmt.Errorf("节点不存在: %s", nodeID)
 	}
 	
-	// 构建下载URL
+	// 构建下载URL — 使用路径方式匹配节点Agent的路由
 	url := fmt.Sprintf("http://%s:%d/api/v1/chunks/%s", node.IPAddress, node.Port, chunkID)
 	
 	// 发送下载请求
@@ -117,43 +66,32 @@ func (dm *DownloadManager) DownloadChunk(chunkID string, nodeID string) ([]byte,
 	return data, nil
 }
 
-// DownloadChunkWithFallback 带容错的下载
-func (dm *DownloadManager) DownloadChunkWithFallback(chunkID string, nodeIDs []string) ([]byte, error) {
+// DownloadChunkWithFallback 从多个节点尝试下载（带容错）
+func (dm *DownloadManager) DownloadChunkWithFallback(chunkID string, nodeIDs []string) ([]byte, string, error) {
 	var lastErr error
 	
 	for _, nodeID := range nodeIDs {
 		data, err := dm.DownloadChunk(chunkID, nodeID)
 		if err == nil {
-			return data, nil
+			return data, nodeID, nil
 		}
 		
 		lastErr = err
-		log.Printf("从节点 %s 下载失败: %v", nodeID, err)
+		log.Printf("从节点 %s 下载分片 %s 失败: %v", nodeID, chunkID, err)
 	}
 	
-	return nil, fmt.Errorf("所有节点下载失败: %w", lastErr)
+	return nil, "", fmt.Errorf("所有节点下载失败: %w", lastErr)
 }
 
-// AssembleFile 组装文件
-func (dm *DownloadManager) AssembleFile(chunks []ChunkDownloadInfo) ([]byte, error) {
-	// 计算总大小
-	totalSize := int64(0)
-	for _, chunk := range chunks {
-		totalSize += chunk.Size
+// getNodeAddress 获取节点地址
+func (dm *DownloadManager) getNodeAddress(nodeID string) (string, int, error) {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+	
+	node, exists := dm.nodes[nodeID]
+	if !exists {
+		return "", 0, fmt.Errorf("节点不存在: %s", nodeID)
 	}
 	
-	// 分配缓冲区
-	fileData := make([]byte, 0, totalSize)
-	
-	// 按顺序组装分片
-	for _, chunk := range chunks {
-		if chunk.Data == nil {
-			return nil, fmt.Errorf("分片 %d 数据为空", chunk.Index)
-		}
-		fileData = append(fileData, chunk.Data...)
-	}
-	
-	log.Printf("文件组装完成, 大小: %d", len(fileData))
-	
-	return fileData, nil
+	return node.IPAddress, node.Port, nil
 }

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -9,17 +10,49 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 )
 
-// HandleChunkUpload 处理分片上传
-func (se *StorageEngine) HandleChunkUpload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+// HandleChunkByPath 处理分片请求（根据URL路径中的chunkID）
+// 支持: /api/v1/chunks/{chunkID} (GET/PUT/DELETE)
+// 以及: /api/v1/chunks/upload?chunk_id=xxx 等旧路由
+func (se *StorageEngine) HandleChunkByPath(w http.ResponseWriter, r *http.Request) {
+	// 提取路径后缀
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chunks/")
+	
+	// 根据路径判断操作
+	switch {
+	case path == "upload":
+		// 旧路由: /api/v1/chunks/upload?chunk_id=xxx
+		se.handleUpload(w, r, r.URL.Query().Get("chunk_id"))
+	case path == "download":
+		// 旧路由: /api/v1/chunks/download?chunk_id=xxx
+		se.handleDownload(w, r, r.URL.Query().Get("chunk_id"))
+	case path == "delete":
+		// 旧路由: /api/v1/chunks/delete?chunk_id=xxx
+		se.handleDelete(w, r, r.URL.Query().Get("chunk_id"))
+	case path != "" && path != "/":
+		// 新路由: /api/v1/chunks/{chunkID}
+		chunkID := path
+		switch r.Method {
+		case http.MethodGet:
+			se.handleDownload(w, r, chunkID)
+		case http.MethodPut:
+			se.handleUpload(w, r, chunkID)
+		case http.MethodDelete:
+			se.handleDelete(w, r, chunkID)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	default:
+		http.Error(w, "Missing chunk_id", http.StatusBadRequest)
 	}
+}
 
-	// 获取分片ID
-	chunkID := r.URL.Query().Get("chunk_id")
+// handleUpload 处理分片上传
+func (se *StorageEngine) handleUpload(w http.ResponseWriter, r *http.Request, chunkID string) {
 	if chunkID == "" {
 		http.Error(w, "Missing chunk_id", http.StatusBadRequest)
 		return
@@ -58,15 +91,8 @@ func (se *StorageEngine) HandleChunkUpload(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(w, `{"success":true,"hash":"%s","size":%d}`, hashStr, len(data))
 }
 
-// HandleChunkDownload 处理分片下载
-func (se *StorageEngine) HandleChunkDownload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// 获取分片ID
-	chunkID := r.URL.Query().Get("chunk_id")
+// handleDownload 处理分片下载
+func (se *StorageEngine) handleDownload(w http.ResponseWriter, r *http.Request, chunkID string) {
 	if chunkID == "" {
 		http.Error(w, "Missing chunk_id", http.StatusBadRequest)
 		return
@@ -95,15 +121,8 @@ func (se *StorageEngine) HandleChunkDownload(w http.ResponseWriter, r *http.Requ
 	w.Write(data)
 }
 
-// HandleChunkDelete 处理分片删除
-func (se *StorageEngine) HandleChunkDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// 获取分片ID
-	chunkID := r.URL.Query().Get("chunk_id")
+// handleDelete 处理分片删除
+func (se *StorageEngine) handleDelete(w http.ResponseWriter, r *http.Request, chunkID string) {
 	if chunkID == "" {
 		http.Error(w, "Missing chunk_id", http.StatusBadRequest)
 		return
@@ -128,7 +147,7 @@ func (se *StorageEngine) HandleChunkDelete(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(w, `{"success":true}`)
 }
 
-// HandleReplicate 处理分片分发
+// HandleReplicate 处理分片分发（接收分片后转发到其他节点）
 func (se *StorageEngine) HandleReplicate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -138,30 +157,41 @@ func (se *StorageEngine) HandleReplicate(w http.ResponseWriter, r *http.Request)
 	// 解析请求
 	var req struct {
 		ChunkID     string   `json:"chunk_id"`
-		TargetNodes []string `json:"target_nodes"`
+		TargetNodes []string `json:"target_nodes"` // 格式: "ip:port"
+		ServerAddr  string   `json:"server_addr"`  // 中心服务器地址，用于解析节点ID
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	// 读取分片数据
+	// 读取本地分片数据
 	chunkPath := filepath.Join(se.config.StoragePath, "chunks", req.ChunkID)
 	data, err := os.ReadFile(chunkPath)
 	if err != nil {
-		http.Error(w, "Read chunk failed", http.StatusInternalServerError)
+		http.Error(w, "Read chunk failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 分发到目标节点
+	// 并行分发到目标节点
 	successCount := 0
-	for _, nodeID := range req.TargetNodes {
-		if err := se.sendToNode(nodeID, req.ChunkID, data); err != nil {
-			log.Printf("分发到节点 %s 失败: %v", nodeID, err)
-			continue
-		}
-		successCount++
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, nodeAddr := range req.TargetNodes {
+		wg.Add(1)
+		go func(addr string) {
+			defer wg.Done()
+			if err := se.sendChunkToNode(addr, req.ChunkID, data); err != nil {
+				log.Printf("分发到节点 %s 失败: %v", addr, err)
+				return
+			}
+			mu.Lock()
+			successCount++
+			mu.Unlock()
+		}(nodeAddr)
 	}
+	wg.Wait()
 
 	log.Printf("分片 %s 分发完成: %d/%d 成功", req.ChunkID, successCount, len(req.TargetNodes))
 
@@ -174,15 +204,40 @@ func (se *StorageEngine) HandleReplicate(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// sendToNode 发送分片到目标节点
-func (se *StorageEngine) sendToNode(nodeID string, chunkID string, data []byte) error {
-	// TODO: 获取节点地址
-	// 这里简化处理，直接返回成功
-	// 实际实现需要：
-	// 1. 从中心服务器获取节点地址
-	// 2. 发送HTTP请求到目标节点
-	// 3. 上传分片数据
+// sendChunkToNode 发送分片到目标节点
+func (se *StorageEngine) sendChunkToNode(nodeAddr string, chunkID string, data []byte) error {
+	client := &http.Client{Timeout: 60 * time.Second}
+	
+	// 重试3次
+	for retry := 0; retry < 3; retry++ {
+		if retry > 0 {
+			log.Printf("重试发送分片 %s 到 %s, 第%d次", chunkID, nodeAddr, retry+1)
+			time.Sleep(time.Duration(retry) * time.Second)
+		}
+		
+		url := fmt.Sprintf("http://%s/api/v1/chunks/%s", nodeAddr, chunkID)
+		req, err := http.NewRequest(http.MethodPut, url, bytes.NewBuffer(data))
+		if err != nil {
+			return fmt.Errorf("创建请求失败: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
 
-	log.Printf("发送分片 %s 到节点 %s", chunkID, nodeID)
-	return nil
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("发送到 %s 失败: %v", nodeAddr, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("发送到 %s 返回 %d: %s", nodeAddr, resp.StatusCode, string(body))
+			continue
+		}
+
+		log.Printf("分片 %s 发送到 %s 成功", chunkID, nodeAddr)
+		return nil
+	}
+
+	return fmt.Errorf("发送分片到 %s 失败（已重试3次）", nodeAddr)
 }
