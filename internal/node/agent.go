@@ -140,7 +140,12 @@ func (a *Agent) startHTTPServer() {
 	})
 
 	// 分片API
-	mux.HandleFunc("/api/v1/chunks/", a.storage.HandleChunk)
+	mux.HandleFunc("/api/v1/chunks/upload", a.storage.HandleChunkUpload)
+	mux.HandleFunc("/api/v1/chunks/download", a.storage.HandleChunkDownload)
+	mux.HandleFunc("/api/v1/chunks/delete", a.storage.HandleChunkDelete)
+
+	// 分发API
+	mux.HandleFunc("/api/v1/replicate", a.storage.HandleReplicate)
 
 	// 存储信息
 	mux.HandleFunc("/api/v1/storage", func(w http.ResponseWriter, r *http.Request) {

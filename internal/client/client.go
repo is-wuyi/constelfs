@@ -12,13 +12,32 @@ type Client struct {
 	config     *Config
 	httpClient *http.Client
 	uploader   *ChunkUploader
+	downloader *ChunkDownloader
 }
 
 // FileInfo 文件信息
 type FileInfo struct {
-	Name string
-	Mode string
-	Size int64
+	FileID        string `json:"file_id"`
+	FileName      string `json:"file_name"`
+	FilePath      string `json:"file_path"`
+	FileSize      int64  `json:"file_size"`
+	IsDirectory   bool   `json:"is_directory"`
+	LatestVersion int    `json:"latest_version"`
+	VersionCount  int    `json:"version_count"`
+	MaxVersions   int    `json:"max_versions"`
+	EncryptionKey string `json:"encryption_key"`
+}
+
+// FileVersion 文件版本
+type FileVersion struct {
+	VersionID string   `json:"version_id"`
+	FileID    string   `json:"file_id"`
+	Version   int      `json:"version"`
+	Size      int64    `json:"size"`
+	Hash      string   `json:"hash"`
+	ChunkIDs  []string `json:"chunk_ids"`
+	NodeIDs   []string `json:"node_ids"`
+	CreatedAt string   `json:"created_at"`
 }
 
 // NodeInfo 节点信息
@@ -35,6 +54,7 @@ func New(config *Config) (*Client, error) {
 		httpClient: &http.Client{},
 	}
 	c.uploader = NewChunkUploader(config)
+	c.downloader = NewChunkDownloader(config)
 	return c, nil
 }
 
@@ -45,8 +65,7 @@ func (c *Client) Upload(filePath string, replicas int) (*UploadResult, error) {
 
 // Download 下载文件
 func (c *Client) Download(fileID, localPath string) error {
-	// TODO: 实现文件下载逻辑
-	return fmt.Errorf("下载功能尚未实现")
+	return c.downloader.Download(fileID, localPath)
 }
 
 // List 列出文件
@@ -65,11 +84,7 @@ func (c *Client) List(dirPath string) ([]*FileInfo, error) {
 	}
 
 	var result struct {
-		Files []struct {
-			FileName string `json:"file_name"`
-			FileSize int64  `json:"file_size"`
-			IsDir    bool   `json:"is_directory"`
-		} `json:"files"`
+		Files []FileInfo `json:"files"`
 	}
 
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -77,16 +92,8 @@ func (c *Client) List(dirPath string) ([]*FileInfo, error) {
 	}
 
 	files := make([]*FileInfo, 0, len(result.Files))
-	for _, f := range result.Files {
-		mode := "-rw-r--r--"
-		if f.IsDir {
-			mode = "drwxr-xr-x"
-		}
-		files = append(files, &FileInfo{
-			Name: f.FileName,
-			Mode: mode,
-			Size: f.FileSize,
-		})
+	for i := range result.Files {
+		files = append(files, &result.Files[i])
 	}
 
 	return files, nil
@@ -94,8 +101,24 @@ func (c *Client) List(dirPath string) ([]*FileInfo, error) {
 
 // Delete 删除文件
 func (c *Client) Delete(fileID string) error {
-	// TODO: 实现文件删除逻辑
-	return fmt.Errorf("删除功能尚未实现")
+	url := fmt.Sprintf("%s/api/v1/files/%s", c.config.ServerAddr, fileID)
+
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("删除失败: %s", resp.Status)
+	}
+
+	return nil
 }
 
 // ListNodes 列出节点

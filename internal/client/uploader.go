@@ -93,7 +93,7 @@ func (u *ChunkUploader) Upload(filePath string, replicas int) (*UploadResult, er
 
 		// 计算分片hash
 		hash := sha256.Sum256(chunkData)
-		chunkHash := fmt.Sprintf("%x", hash)
+		chunkHash = fmt.Sprintf("%x", hash)
 
 		// 上传分片
 		chunkID, err := u.uploadChunk(fileID, i, chunkData, chunkHash, replicas)
@@ -105,7 +105,7 @@ func (u *ChunkUploader) Upload(filePath string, replicas int) (*UploadResult, er
 		fmt.Printf("分片 %d/%d 上传成功\n", i+1, chunkCount)
 	}
 
-	// 4. 创建版本
+	// 创建版本
 	if err := u.createVersion(fileID, filepath.Base(filePath), filePath, fileInfo.Size(), chunkHash, chunkIDs, replicas); err != nil {
 		return nil, fmt.Errorf("创建版本失败: %w", err)
 	}
@@ -116,7 +116,6 @@ func (u *ChunkUploader) Upload(filePath string, replicas int) (*UploadResult, er
 		Chunks:  chunkIDs,
 	}, nil
 }
-
 
 // createVersion 创建版本
 func (u *ChunkUploader) createVersion(fileID, fileName, filePath string, fileSize int64, hash string, chunkIDs []string, replicas int) error {
@@ -227,13 +226,6 @@ func (u *ChunkUploader) uploadChunk(fileID string, index int64, data []byte, has
 	}
 	defer confirmResp.Body.Close()
 
-	// 检查响应状态码
-	if confirmResp.StatusCode != http.StatusOK {
-		// 读取错误响应
-		body, _ := io.ReadAll(confirmResp.Body)
-		return "", fmt.Errorf("确认写入失败: %s", string(body))
-	}
-
 	var confirmResult struct {
 		Success bool `json:"success"`
 	}
@@ -269,9 +261,15 @@ func (u *ChunkUploader) getNodeAddress(nodeID string) (string, error) {
 
 // uploadToNode 上传分片到节点
 func (u *ChunkUploader) uploadToNode(nodeAddr string, chunkID string, data []byte) error {
-	url := fmt.Sprintf("http://%s/api/v1/upload?chunk_id=%s", nodeAddr, chunkID)
+	url := fmt.Sprintf("http://%s/api/v1/chunks/upload?chunk_id=%s", nodeAddr, chunkID)
 
-	resp, err := u.httpClient.Post(url, "application/octet-stream", bytes.NewBuffer(data))
+	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := u.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
