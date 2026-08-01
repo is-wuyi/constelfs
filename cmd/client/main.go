@@ -65,7 +65,7 @@ func main() {
 			log.Fatalf("列出文件失败: %v", err)
 		}
 		for _, f := range files {
-			fmt.Printf("%s\t%d\t%s\n", f.Mode, f.Size, f.Name)
+			fmt.Printf("%s\t%d\t%s\n", f.FileID, f.FileSize, f.FileName)
 		}
 
 	case "delete":
