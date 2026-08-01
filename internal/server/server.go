@@ -80,6 +80,7 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/v1/nodes/", s.handleNode)
 	mux.HandleFunc("/api/v1/files", s.fileMgr.HandleFiles)
 	mux.HandleFunc("/api/v1/files/", s.fileMgr.HandleFile)
+	mux.HandleFunc("/api/v1/upload", s.fileMgr.HandleUpload)
 	mux.HandleFunc("/api/v1/write", s.handleWrite)
 	mux.HandleFunc("/api/v1/write/confirm", s.handleConfirmWrite)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
