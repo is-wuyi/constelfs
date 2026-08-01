@@ -92,7 +92,7 @@ func TestDownloadManagerAssembleFile(t *testing.T) {
 	// 创建测试分片数据
 	chunks := []ChunkDownloadInfo{
 		{Index: 0, Size: 5, Data: []byte("Hello")},
-		{Index: 1, Size: 6, Data: []byte(", World")},
+		{Index: 1, Size: 7, Data: []byte(", World")},
 		{Index: 2, Size: 1, Data: []byte("!")},
 	}
 	
@@ -109,7 +109,7 @@ func TestDownloadManagerAssembleFile(t *testing.T) {
 	}
 	
 	// 验证文件大小
-	expectedSize := int64(12)
+	expectedSize := int64(13)
 	if int64(len(fileData)) != expectedSize {
 		t.Errorf("文件大小不匹配: 期望 %d, 实际 %d", expectedSize, len(fileData))
 	}
@@ -121,7 +121,7 @@ func TestDownloadManagerAssembleFileWithNilData(t *testing.T) {
 	// 创建测试分片数据（包含空数据）
 	chunks := []ChunkDownloadInfo{
 		{Index: 0, Size: 5, Data: []byte("Hello")},
-		{Index: 1, Size: 6, Data: nil}, // 空数据
+		{Index: 1, Size: 7, Data: nil}, // 空数据
 		{Index: 2, Size: 1, Data: []byte("!")},
 	}
 	
