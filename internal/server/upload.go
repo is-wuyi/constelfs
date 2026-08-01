@@ -152,7 +152,12 @@ func (fm *FileManager) uploadChunks(fileID string, data []byte, replicas int) ([
 	if chunkSize == 0 {
 		return []string{}, []string{}, nil
 	}
+	
+	// 计算分片数量，确保不会除零
 	chunkCount := (int64(len(data)) + chunkSize - 1) / chunkSize
+	if chunkCount == 0 {
+		chunkCount = 1
+	}
 
 	chunkIDs := make([]string, 0, chunkCount)
 	nodeIDs := make([]string, 0, replicas)
