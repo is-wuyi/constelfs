@@ -1,7 +1,6 @@
 package server
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"log"
 	"sync"
