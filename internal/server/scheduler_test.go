@@ -10,12 +10,13 @@ func TestScoreNode(t *testing.T) {
 
 	// 测试健康节点
 	node := &Node{
-		CPUUsage:      20,
-		MemoryUsage:   30,
-		DiskUsage:     40,
+		CPUUsage:       20,
+		MemoryUsage:    30,
+		DiskUsage:      40,
 		AllocatedSpace: 100 * 1024 * 1024 * 1024, // 100GB
-		UsedSpace:     20 * 1024 * 1024 * 1024,   // 20GB
-		LastHeartbeat: time.Now(),
+		UsedSpace:      20 * 1024 * 1024 * 1024,   // 20GB
+		OnlineRate:     1.0,                         // 在线率100%
+		LastHeartbeat:  time.Now(),
 	}
 
 	score := scheduler.ScoreNode(node)
@@ -25,12 +26,13 @@ func TestScoreNode(t *testing.T) {
 
 	// 测试高负载节点
 	highLoadNode := &Node{
-		CPUUsage:      90,
-		MemoryUsage:   85,
-		DiskUsage:     80,
+		CPUUsage:       90,
+		MemoryUsage:    85,
+		DiskUsage:      80,
 		AllocatedSpace: 100 * 1024 * 1024 * 1024,
-		UsedSpace:     90 * 1024 * 1024 * 1024,
-		LastHeartbeat: time.Now(),
+		UsedSpace:      90 * 1024 * 1024 * 1024,
+		OnlineRate:     1.0,
+		LastHeartbeat:  time.Now(),
 	}
 
 	highLoadScore := scheduler.ScoreNode(highLoadNode)
@@ -40,12 +42,13 @@ func TestScoreNode(t *testing.T) {
 
 	// 测试心跳超时节点
 	timeoutNode := &Node{
-		CPUUsage:      20,
-		MemoryUsage:   30,
-		DiskUsage:     40,
+		CPUUsage:       20,
+		MemoryUsage:    30,
+		DiskUsage:      40,
 		AllocatedSpace: 100 * 1024 * 1024 * 1024,
-		UsedSpace:     20 * 1024 * 1024 * 1024,
-		LastHeartbeat: time.Now().Add(-2 * time.Minute),
+		UsedSpace:      20 * 1024 * 1024 * 1024,
+		OnlineRate:     0.0, // 在线率0%
+		LastHeartbeat:  time.Now().Add(-2 * time.Minute),
 	}
 
 	timeoutScore := scheduler.ScoreNode(timeoutNode)
@@ -67,6 +70,7 @@ func TestSelectNodes(t *testing.T) {
 			MemoryUsage:    30,
 			AllocatedSpace: 100 * 1024 * 1024 * 1024,
 			UsedSpace:      20 * 1024 * 1024 * 1024,
+			OnlineRate:     1.0,
 			LastHeartbeat:  time.Now(),
 		},
 		"node-2": {
@@ -77,6 +81,7 @@ func TestSelectNodes(t *testing.T) {
 			MemoryUsage:    60,
 			AllocatedSpace: 100 * 1024 * 1024 * 1024,
 			UsedSpace:      50 * 1024 * 1024 * 1024,
+			OnlineRate:     1.0,
 			LastHeartbeat:  time.Now(),
 		},
 		"node-3": {
@@ -87,6 +92,7 @@ func TestSelectNodes(t *testing.T) {
 			MemoryUsage:    20,
 			AllocatedSpace: 100 * 1024 * 1024 * 1024,
 			UsedSpace:      10 * 1024 * 1024 * 1024,
+			OnlineRate:     1.0,
 			LastHeartbeat:  time.Now(),
 		},
 	}
