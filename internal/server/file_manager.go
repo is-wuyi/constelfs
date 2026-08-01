@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -40,36 +41,54 @@ func (fm *FileManager) HandleFiles(w http.ResponseWriter, r *http.Request) {
 
 // HandleFile 处理单个文件请求
 func (fm *FileManager) HandleFile(w http.ResponseWriter, r *http.Request) {
-	// 从URL提取file_id
+	// 从URL提取file_id和后续路径
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
-	parts := strings.SplitN(path, "/", 2)
+	parts := strings.Split(path, "/")
+	
+	if len(parts) == 0 {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	
 	fileID := parts[0]
-
+	
+	// 处理不同的路由
 	switch {
+	// GET /api/v1/files/:id - 获取文件详情
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		fm.getFile(w, r, fileID)
+		
+	// DELETE /api/v1/files/:id - 删除文件
 	case len(parts) == 1 && r.Method == http.MethodDelete:
 		fm.deleteFile(w, r, fileID)
+		
+	// GET /api/v1/files/:id/download - 下载最新版本
 	case len(parts) == 2 && parts[1] == "download" && r.Method == http.MethodGet:
-		fm.downloadFile(w, r, fileID, 0) // 0 表示最新版本
+		fm.downloadFile(w, r, fileID, 0)
+		
+	// POST /api/v1/files/:id/rollback - 版本回滚
 	case len(parts) == 2 && parts[1] == "rollback" && r.Method == http.MethodPost:
 		fm.rollbackFile(w, r, fileID)
+		
+	// GET /api/v1/files/:id/versions/:v/download - 下载指定版本
+	case len(parts) == 4 && parts[1] == "versions" && parts[3] == "download" && r.Method == http.MethodGet:
+		version, err := strconv.Atoi(parts[2])
+		if err != nil {
+			http.Error(w, "Invalid version", http.StatusBadRequest)
+			return
+		}
+		fm.downloadFile(w, r, fileID, version)
+		
+	// DELETE /api/v1/files/:id/versions/:v - 删除指定版本
+	case len(parts) == 3 && parts[1] == "versions" && r.Method == http.MethodDelete:
+		version, err := strconv.Atoi(parts[2])
+		if err != nil {
+			http.Error(w, "Invalid version", http.StatusBadRequest)
+			return
+		}
+		fm.deleteVersion(w, r, fileID, version)
+		
 	default:
-		// 检查是否是版本下载请求
-		if len(parts) == 3 && parts[1] == "versions" && strings.HasSuffix(parts[2], "/download") {
-			versionStr := strings.TrimSuffix(parts[2], "/download")
-			var version int
-			fmt.Sscanf(versionStr, "%d", &version)
-			fm.downloadFile(w, r, fileID, version)
-			return
-		}
-		// 检查是否是版本删除请求
-		if len(parts) == 3 && parts[1] == "versions" && r.Method == http.MethodDelete {
-			var version int
-			fmt.Sscanf(parts[2], "%d", &version)
-			fm.deleteVersion(w, r, fileID, version)
-			return
-		}
 		http.Error(w, "Not found", http.StatusNotFound)
 	}
 }
@@ -256,12 +275,16 @@ func (fm *FileManager) deleteVersion(w http.ResponseWriter, r *http.Request, fil
 			fm.versionManager.DeleteVersion(v)
 			fm.versions[fileID] = append(versions[:i], versions[i+1:]...)
 			file.VersionCount--
-			break
+			
+			log.Printf("删除版本: 文件=%s, 版本=%d", fileID, version)
+			
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+			})
+			return
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-	})
+	http.Error(w, `{"error":"Version not found"}`, http.StatusNotFound)
 }
