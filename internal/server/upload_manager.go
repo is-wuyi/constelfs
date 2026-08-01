@@ -184,26 +184,3 @@ func (um *UploadManager) ConfirmChunkUpload(sessionID string, chunkIndex int, ha
 	
 	return nil
 }
-
-// calculateChunkSize 计算分片大小
-func calculateChunkSize(fileSize int64) int64 {
-	const (
-		ChunkSize10MB  = 10 * 1024 * 1024
-		ChunkSize100MB = 100 * 1024 * 1024
-		ChunkSize1GB   = 1024 * 1024 * 1024
-		ChunkSize10GB  = 10 * 1024 * 1024 * 1024
-	)
-	
-	switch {
-	case fileSize < ChunkSize10MB:
-		return fileSize
-	case fileSize < ChunkSize100MB:
-		return 4 * 1024 * 1024
-	case fileSize < ChunkSize1GB:
-		return 16 * 1024 * 1024
-	case fileSize < ChunkSize10GB:
-		return 64 * 1024 * 1024
-	default:
-		return 128 * 1024 * 1024
-	}
-}
