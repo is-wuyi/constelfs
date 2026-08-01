@@ -57,7 +57,7 @@
 
 ### 9. 协议转出
 - [x] WebDAV协议支持
-- [ ] SMB协议（待实现）
+- [x] SMB协议支持（需要samba）
 - [ ] FUSE挂载（需要CGO支持）
 
 ### 10. 测试
@@ -75,7 +75,7 @@
 | 节点 | 地址 | 状态 | 存储路径 | 预分配空间 |
 |------|------|------|---------|-----------|
 | nas-27119 | 27119.et.net:8081 | ✅ 在线 | /volume1/constelfs-storage/data | 50GB |
-| nas-27233 | 27233.et.net:8081 | ⚠️ SSH不稳定 | - | - |
+| nas-27233 | 27233.et.net:8081 | ✅ 在线 | /volume1/constelfs-storage/data | 50GB |
 | nas-27348 | 27348.et.net:8081 | ✅ 在线 | /volume1/constelfs-storage/data | 50GB |
 
 ## 📦 技术栈
@@ -88,7 +88,7 @@
 | Web前端 | Vue3 + Element Plus |
 | 测速工具 | superbench.sh |
 | 加密算法 | AES-256-GCM |
-| 协议转出 | WebDAV |
+| 协议转出 | WebDAV, SMB |
 
 ## 🔗 相关链接
 
