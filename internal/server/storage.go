@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -18,36 +17,35 @@ type ChunkInfo struct {
 	Index     int       `json:"index"`
 	Size      int64     `json:"size"`
 	Hash      string    `json:"hash"`
-	Replicas  []string  `json:"replicas"`  // 存储该分片的节点列表 (nodeID)
-	Status    string    `json:"status"`    // pending, writing, success, failed
+	Replicas  []string  `json:"replicas"`
+	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// WriteRequest 写入请求
 type WriteRequest struct {
 	FileID   string `json:"file_id"`
 	FileName string `json:"file_name"`
 	FileSize int64  `json:"file_size"`
-	Replicas int    `json:"replicas"` // 副本数，默认3
+	Replicas int    `json:"replicas"`
 }
 
-// WriteResponse 写入响应
 type WriteResponse struct {
-	Success    bool     `json:"success"`
-	ChunkID    string   `json:"chunk_id,omitempty"`
-	ChunkIDs   []string `json:"chunk_ids,omitempty"`
-	Nodes      []string `json:"nodes,omitempty"`   // 写入的节点列表 (nodeID)
-	NodeAddrs  []string `json:"node_addrs,omitempty"` // 节点地址列表
-	Error      string   `json:"error,omitempty"`
+	Success   bool     `json:"success"`
+	ChunkID   string   `json:"chunk_id,omitempty"`
+	ChunkIDs  []string `json:"chunk_ids,omitempty"`
+	Nodes     []string `json:"nodes,omitempty"`
+	NodeAddrs []string `json:"node_addrs,omitempty"`
+	Error     string   `json:"error,omitempty"`
 }
 
 // StorageManager 存储管理器
 type StorageManager struct {
-	scheduler        *Scheduler
-	replicationMgr   *ReplicationManager
-	downloadMgr      *DownloadManager
-	chunks           map[string]*ChunkInfo
-	mu               sync.RWMutex
+	scheduler      *Scheduler
+	replicationMgr *ReplicationManager
+	downloadMgr    *DownloadManager
+	chunks         map[string]*ChunkInfo
+	persist        *PersistenceManager
+	mu             sync.RWMutex
 }
 
 // NewStorageManager 创建存储管理器
@@ -60,23 +58,26 @@ func NewStorageManager(scheduler *Scheduler) *StorageManager {
 	}
 }
 
+// SetPersistence 设置持久化管理器
+func (sm *StorageManager) SetPersistence(persist *PersistenceManager) {
+	sm.persist = persist
+}
+
 // UpdateNodes 更新节点列表
 func (sm *StorageManager) UpdateNodes(nodes map[string]*Node) {
 	sm.replicationMgr.UpdateNodes(nodes)
 	sm.downloadMgr.UpdateNodes(nodes)
 }
 
-// PrepareWrite 准备写入 — 选择节点并返回节点列表
+// PrepareWrite 准备写入
 func (sm *StorageManager) PrepareWrite(server *Server, req *WriteRequest) (*WriteResponse, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// 默认3副本
 	if req.Replicas == 0 {
 		req.Replicas = 3
 	}
 
-	// 智能选择节点
 	nodes := sm.scheduler.SelectNodes(server.nodes, req.Replicas, nil)
 	if len(nodes) == 0 {
 		return &WriteResponse{
@@ -85,10 +86,8 @@ func (sm *StorageManager) PrepareWrite(server *Server, req *WriteRequest) (*Writ
 		}, nil
 	}
 
-	// 生成分片ID
 	chunkID := fmt.Sprintf("%s_chunk_%d", req.FileID, time.Now().UnixNano())
 	
-	// 记录分片信息
 	chunk := &ChunkInfo{
 		ChunkID:   chunkID,
 		FileID:    req.FileID,
@@ -97,7 +96,6 @@ func (sm *StorageManager) PrepareWrite(server *Server, req *WriteRequest) (*Writ
 		CreatedAt: time.Now(),
 	}
 	
-	// 记录副本位置
 	var nodeIDs []string
 	var nodeAddrs []string
 	for _, node := range nodes {
@@ -107,6 +105,13 @@ func (sm *StorageManager) PrepareWrite(server *Server, req *WriteRequest) (*Writ
 	}
 	
 	sm.chunks[chunkID] = chunk
+
+	// 持久化分片信息
+	if sm.persist != nil {
+		if err := sm.persist.SaveChunk(chunk); err != nil {
+			log.Printf("持久化分片 %s 失败: %v", chunkID, err)
+		}
+	}
 
 	return &WriteResponse{
 		Success:   true,
@@ -126,30 +131,37 @@ func (sm *StorageManager) ConfirmWrite(chunkID string, hash string) error {
 		return fmt.Errorf("分片不存在: %s", chunkID)
 	}
 
-	// 记录hash并标记为成功
 	chunk.Status = "success"
 	chunk.Hash = hash
 	
-	// 获取需要分发的目标节点（除第一个节点外的所有副本节点）
 	var targetNodeIDs []string
 	sourceNodeID := ""
 	if len(chunk.Replicas) > 0 {
 		sourceNodeID = chunk.Replicas[0]
 		targetNodeIDs = chunk.Replicas[1:]
 	}
+	
+	// 持久化分片状态
+	if sm.persist != nil {
+		if err := sm.persist.SaveChunk(chunk); err != nil {
+			log.Printf("持久化分片 %s 失败: %v", chunkID, err)
+		}
+	}
+	
 	sm.mu.Unlock()
 
 	log.Printf("分片 %s 写入成功, hash: %s, 副本节点: %v", chunkID, hash, chunk.Replicas)
 
-	// 异步触发副本分发
 	if len(targetNodeIDs) > 0 && sourceNodeID != "" {
 		go func() {
 			if err := sm.replicationMgr.ReplicateChunk(chunkID, sourceNodeID, targetNodeIDs); err != nil {
 				log.Printf("分片 %s 副本分发失败: %v", chunkID, err)
-				// 分发失败不阻塞主流程，但标记为降级
 				sm.mu.Lock()
 				if c, ok := sm.chunks[chunkID]; ok {
 					c.Status = "degraded"
+					if sm.persist != nil {
+						sm.persist.SaveChunk(c)
+					}
 				}
 				sm.mu.Unlock()
 			} else {
@@ -189,7 +201,7 @@ func (sm *StorageManager) GetChunksByFileID(fileID string) []*ChunkInfo {
 	return chunks
 }
 
-// DeleteChunk 删除分片（从所有副本节点）
+// DeleteChunk 删除分片
 func (sm *StorageManager) DeleteChunk(chunkID string) error {
 	sm.mu.Lock()
 	chunk, exists := sm.chunks[chunkID]
@@ -198,14 +210,20 @@ func (sm *StorageManager) DeleteChunk(chunkID string) error {
 		return fmt.Errorf("分片不存在: %s", chunkID)
 	}
 	
-	// 获取副本节点列表
 	replicas := make([]string, len(chunk.Replicas))
 	copy(replicas, chunk.Replicas)
 	
 	delete(sm.chunks, chunkID)
+	
+	// 持久化删除
+	if sm.persist != nil {
+		if err := sm.persist.DeleteChunk(chunkID); err != nil {
+			log.Printf("持久化删除分片 %s 失败: %v", chunkID, err)
+		}
+	}
+	
 	sm.mu.Unlock()
 
-	// 从所有副本节点删除分片
 	for _, nodeID := range replicas {
 		sm.downloadMgr.mu.RLock()
 		node, ok := sm.downloadMgr.nodes[nodeID]
@@ -248,17 +266,6 @@ func (sm *StorageManager) UploadToNode(nodeAddr string, chunkID string, data []b
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("上传返回 %d: %s", resp.StatusCode, string(body))
-	}
-
-	// 解析响应获取hash
-	var result struct {
-		Success bool   `json:"success"`
-		Hash    string `json:"hash"`
-		Size    int64  `json:"size"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		// 忽略解析错误，上传成功即可
-		return nil
 	}
 
 	return nil

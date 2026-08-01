@@ -16,19 +16,18 @@ import (
 type Server struct {
 	config    *Config
 	db        *bolt.DB
+	persist   *PersistenceManager
 	grpc      *grpc.Server
 	scheduler *Scheduler
 	storage   *StorageManager
 	fileMgr   *FileManager
 	mu        sync.RWMutex
 
-	// 节点管理
 	nodes map[string]*Node
 }
 
 // New 创建新的服务器
 func New(config *Config) (*Server, error) {
-	// 打开数据库
 	db, err := bolt.Open(config.DatabasePath, 0600, &bolt.Options{
 		Timeout: 1,
 	})
@@ -36,9 +35,8 @@ func New(config *Config) (*Server, error) {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
 
-	// 初始化数据库Bucket
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"Nodes", "Files", "Chunks", "Replicas", "Users"}
+		buckets := []string{"Nodes", "Files", "Chunks", "Replicas", "Users", "SpeedTests"}
 		for _, name := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("创建Bucket %s 失败: %w", name, err)
@@ -50,32 +48,82 @@ func New(config *Config) (*Server, error) {
 		return nil, err
 	}
 
-	// 创建调度器、存储管理器、版本管理器、文件管理器
+	persist := NewPersistenceManager(db)
 	scheduler := NewScheduler()
 	storage := NewStorageManager(scheduler)
 	versionMgr := NewVersionManager(storage)
 	fileMgr := NewFileManager(versionMgr, storage, scheduler)
 
+	// 设置持久化管理器
+	storage.SetPersistence(persist)
+	fileMgr.SetPersistence(persist)
+
 	s := &Server{
 		config:    config,
 		db:        db,
+		persist:   persist,
 		scheduler: scheduler,
 		storage:   storage,
 		fileMgr:   fileMgr,
 		nodes:     make(map[string]*Node),
 	}
 
-	// 启动节点状态检查器
+	if err := s.loadData(); err != nil {
+		log.Printf("加载历史数据失败: %v", err)
+	}
+
 	s.StartNodeChecker()
 
 	return s, nil
 }
 
-// Router 返回HTTP路由器
+// loadData 从数据库加载数据
+func (s *Server) loadData() error {
+	nodes, err := s.persist.LoadNodes()
+	if err != nil {
+		return fmt.Errorf("加载节点失败: %w", err)
+	}
+	s.nodes = nodes
+	log.Printf("加载了 %d 个节点", len(nodes))
+
+	files, err := s.persist.LoadFiles()
+	if err != nil {
+		return fmt.Errorf("加载文件失败: %w", err)
+	}
+	s.fileMgr.files = files
+	log.Printf("加载了 %d 个文件", len(files))
+
+	versions, err := s.persist.LoadVersions()
+	if err != nil {
+		return fmt.Errorf("加载版本失败: %w", err)
+	}
+	s.fileMgr.versions = versions
+	loadedVersions := 0
+	for _, v := range versions {
+		loadedVersions += len(v)
+	}
+	log.Printf("加载了 %d 个版本", loadedVersions)
+
+	chunks, err := s.persist.LoadChunks()
+	if err != nil {
+		return fmt.Errorf("加载分片失败: %w", err)
+	}
+	s.storage.chunks = chunks
+	log.Printf("加载了 %d 个分片", len(chunks))
+
+	s.syncNodes()
+
+	return nil
+}
+
+func (s *Server) syncNodes() {
+	s.fileMgr.UpdateNodes(s.nodes)
+	s.storage.UpdateNodes(s.nodes)
+}
+
 func (s *Server) Router() http.Handler {
 	mux := http.NewServeMux()
 
-	// API路由
 	mux.HandleFunc("/api/v1/nodes", s.handleNodes)
 	mux.HandleFunc("/api/v1/nodes/", s.handleNode)
 	mux.HandleFunc("/api/v1/files", s.fileMgr.HandleFiles)
@@ -87,13 +135,11 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/v1/version/create", s.fileMgr.HandleCreateVersion)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 
-	// 静态文件（Web管理界面）
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 
 	return mux
 }
 
-// StartGRPC 启动gRPC服务
 func (s *Server) StartGRPC(addr string) error {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -106,7 +152,6 @@ func (s *Server) StartGRPC(addr string) error {
 	return s.grpc.Serve(lis)
 }
 
-// Shutdown 关闭服务器
 func (s *Server) Shutdown() {
 	if s.grpc != nil {
 		s.grpc.GracefulStop()
@@ -116,14 +161,12 @@ func (s *Server) Shutdown() {
 	}
 }
 
-// handleHealth 健康检查
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, `{"status":"ok"}`)
 }
 
-// handleWrite 处理写入请求
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -136,12 +179,10 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 默认3副本
 	if req.Replicas == 0 {
 		req.Replicas = 3
 	}
 
-	// 准备写入
 	resp, err := s.storage.PrepareWrite(s, &req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -152,7 +193,6 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleConfirmWrite 确认写入完成
 func (s *Server) handleConfirmWrite(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

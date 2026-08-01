@@ -20,8 +20,7 @@ const (
 	NodeStatusMaintenance NodeStatus = "maintenance"
 )
 
-// 节点心跳超时时间（秒）
-const HeartbeatTimeout = 90 // 3次心跳间隔（30秒 * 3）
+const HeartbeatTimeout = 90
 
 // Node 存储节点信息
 type Node struct {
@@ -37,16 +36,15 @@ type Node struct {
 	CPUUsage       float64    `json:"cpu_usage"`
 	MemoryUsage    float64    `json:"memory_usage"`
 	DiskUsage      float64    `json:"disk_usage"`
-	UploadSpeed    float64    `json:"upload_speed"`    // Mbps
-	DownloadSpeed  float64    `json:"download_speed"`  // Mbps
-	OnlineRate     float64    `json:"online_rate"`     // 在线率 (0-1)
+	UploadSpeed    float64    `json:"upload_speed"`
+	DownloadSpeed  float64    `json:"download_speed"`
+	OnlineRate     float64    `json:"online_rate"`
 	LastHeartbeat  time.Time  `json:"last_heartbeat"`
 	LastSpeedTest  time.Time  `json:"last_speed_test"`
 	ConfiguredAt   time.Time  `json:"configured_at"`
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
-// RegisterRequest 节点注册请求
 type RegisterRequest struct {
 	NodeID         string  `json:"node_id"`
 	IPAddress      string  `json:"ip_address"`
@@ -57,13 +55,11 @@ type RegisterRequest struct {
 	DiskUsage      float64 `json:"disk_usage"`
 }
 
-// ConfigureRequest 节点配置请求
 type ConfigureRequest struct {
 	StoragePath    string `json:"storage_path"`
 	AllocatedSpace int64  `json:"allocated_space"`
 }
 
-// HeartbeatRequest 心跳请求
 type HeartbeatRequest struct {
 	CPUUsage    float64 `json:"cpu_usage"`
 	MemoryUsage float64 `json:"memory_usage"`
@@ -72,18 +68,11 @@ type HeartbeatRequest struct {
 	Status      string  `json:"status"`
 }
 
-// SpeedTestResult 测速结果
 type SpeedTestResult struct {
 	UploadSpeed   float64   `json:"upload_speed"`
 	DownloadSpeed float64   `json:"download_speed"`
 	Latency       int64     `json:"latency"`
 	TestTime      time.Time `json:"test_time"`
-}
-
-// syncNodes 同步节点信息到所有管理器
-func (s *Server) syncNodes() {
-	s.fileMgr.UpdateNodes(s.nodes)
-	s.storage.UpdateNodes(s.nodes)
 }
 
 // StartNodeChecker 启动节点状态检查器
@@ -105,6 +94,7 @@ func (s *Server) checkNodeStatus() {
 	defer s.mu.Unlock()
 
 	now := time.Now()
+	changed := false
 	for _, node := range s.nodes {
 		if node.Status == NodeStatusConfigured || node.Status == NodeStatusOnline {
 			elapsed := now.Sub(node.LastHeartbeat).Seconds()
@@ -112,30 +102,21 @@ func (s *Server) checkNodeStatus() {
 				if node.Status != NodeStatusOffline {
 					log.Printf("节点 %s 心跳超时 (%.0f秒)，标记为离线", node.NodeID, elapsed)
 					node.Status = NodeStatusOffline
+					changed = true
+					if s.persist != nil {
+						if err := s.persist.SaveNode(node); err != nil {
+							log.Printf("持久化节点 %s 失败: %v", node.NodeID, err)
+						}
+					}
 				}
 			}
 		}
 	}
-	s.syncNodes()
-}
-
-// checkNodeStatusWithLock 检查节点状态（调用者已加锁）
-func (s *Server) checkNodeStatusWithLock() {
-	now := time.Now()
-	for _, node := range s.nodes {
-		if node.Status == NodeStatusConfigured || node.Status == NodeStatusOnline {
-			elapsed := now.Sub(node.LastHeartbeat).Seconds()
-			if elapsed > HeartbeatTimeout {
-				if node.Status != NodeStatusOffline {
-					log.Printf("节点 %s 心跳超时 (%.0f秒)，标记为离线", node.NodeID, elapsed)
-					node.Status = NodeStatusOffline
-				}
-			}
-		}
+	if changed {
+		s.syncNodes()
 	}
 }
 
-// handleNodes 处理节点列表请求
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -147,7 +128,6 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleNode 处理单个节点请求
 func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/nodes/")
 	parts := strings.SplitN(path, "/", 2)
@@ -169,12 +149,9 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// listNodes 获取节点列表
 func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	s.checkNodeStatusWithLock()
 
 	nodes := make([]*Node, 0, len(s.nodes))
 	for _, node := range s.nodes {
@@ -188,7 +165,6 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// getNode 获取单个节点
 func (s *Server) getNode(w http.ResponseWriter, r *http.Request, nodeID string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -203,7 +179,6 @@ func (s *Server) getNode(w http.ResponseWriter, r *http.Request, nodeID string) 
 	json.NewEncoder(w).Encode(node)
 }
 
-// deleteNode 删除节点
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, nodeID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,8 +195,14 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, nodeID strin
 	}
 
 	delete(s.nodes, nodeID)
-	s.syncNodes()
 	
+	if s.persist != nil {
+		if err := s.persist.DeleteNode(nodeID); err != nil {
+			log.Printf("持久化删除节点 %s 失败: %v", nodeID, err)
+		}
+	}
+	
+	s.syncNodes()
 	log.Printf("节点已删除: %s", nodeID)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -231,7 +212,6 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, nodeID strin
 	})
 }
 
-// registerNode 注册新节点
 func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -266,8 +246,13 @@ func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.syncNodes()
+	if s.persist != nil {
+		if err := s.persist.SaveNode(s.nodes[req.NodeID]); err != nil {
+			log.Printf("持久化节点 %s 失败: %v", req.NodeID, err)
+		}
+	}
 
+	s.syncNodes()
 	log.Printf("节点注册: %s (%s)", req.NodeID, req.IPAddress)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -278,7 +263,6 @@ func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// configureNode 配置节点存储
 func (s *Server) configureNode(w http.ResponseWriter, r *http.Request, nodeID string) {
 	var req ConfigureRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -305,8 +289,13 @@ func (s *Server) configureNode(w http.ResponseWriter, r *http.Request, nodeID st
 	node.Status = NodeStatusConfigured
 	node.ConfiguredAt = time.Now()
 
-	s.syncNodes()
+	if s.persist != nil {
+		if err := s.persist.SaveNode(node); err != nil {
+			log.Printf("持久化节点 %s 失败: %v", nodeID, err)
+		}
+	}
 
+	s.syncNodes()
 	log.Printf("节点配置: %s, 路径: %s, 空间: %dGB", nodeID, req.StoragePath, req.AllocatedSpace/1024/1024/1024)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -316,7 +305,6 @@ func (s *Server) configureNode(w http.ResponseWriter, r *http.Request, nodeID st
 	})
 }
 
-// heartbeatNode 处理节点心跳
 func (s *Server) heartbeatNode(w http.ResponseWriter, r *http.Request, nodeID string) {
 	var req HeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -344,6 +332,12 @@ func (s *Server) heartbeatNode(w http.ResponseWriter, r *http.Request, nodeID st
 		log.Printf("节点 %s 上线", nodeID)
 	}
 
+	if s.persist != nil {
+		if err := s.persist.SaveNode(node); err != nil {
+			log.Printf("持久化节点 %s 失败: %v", nodeID, err)
+		}
+	}
+
 	s.syncNodes()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -353,10 +347,9 @@ func (s *Server) heartbeatNode(w http.ResponseWriter, r *http.Request, nodeID st
 	})
 }
 
-// speedTestNode 处理节点测速结果
 func (s *Server) speedTestNode(w http.ResponseWriter, r *http.Request, nodeID string) {
-	var req SpeedTestResult
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var result SpeedTestResult
+	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
@@ -370,14 +363,22 @@ func (s *Server) speedTestNode(w http.ResponseWriter, r *http.Request, nodeID st
 		return
 	}
 
-	node.UploadSpeed = req.UploadSpeed
-	node.DownloadSpeed = req.DownloadSpeed
+	node.UploadSpeed = result.UploadSpeed
+	node.DownloadSpeed = result.DownloadSpeed
 	node.LastSpeedTest = time.Now()
 
-	s.syncNodes()
+	if s.persist != nil {
+		if err := s.persist.SaveNode(node); err != nil {
+			log.Printf("持久化节点 %s 失败: %v", nodeID, err)
+		}
+		if err := s.persist.SaveSpeedTestResult(nodeID, &result); err != nil {
+			log.Printf("持久化测速结果 %s 失败: %v", nodeID, err)
+		}
+	}
 
+	s.syncNodes()
 	log.Printf("节点 %s 测速完成: 上传=%.2f Mbps, 下载=%.2f Mbps", 
-		nodeID, req.UploadSpeed, req.DownloadSpeed)
+		nodeID, result.UploadSpeed, result.DownloadSpeed)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
