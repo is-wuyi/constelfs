@@ -6,19 +6,11 @@ import (
 	"strings"
 )
 
-// FileInfo 文件信息
-type FileInfo struct {
-	ID                int64     `json:"id"`
-	UserID            int64     `json:"user_id"`
-	DirPath           string    `json:"dir_path"`
-	FileName          string    `json:"file_name"`
-	FilePath          string    `json:"file_path"`
-	FileSize          int64     `json:"file_size"`
-	IsDirectory       bool      `json:"is_directory"`
-	ReplicationFactor int       `json:"replication_factor"`
-	ErasureCoded      bool      `json:"erasure_coded"`
-	CreatedAt         string    `json:"created_at"`
-	UpdatedAt         string    `json:"updated_at"`
+// FileListResponse 文件列表响应
+type FileListResponse struct {
+	Files []*FileInfo `json:"files"`
+	Total int         `json:"total"`
+	Dir   string      `json:"dir"`
 }
 
 // handleFiles 处理文件列表请求
