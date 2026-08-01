@@ -221,6 +221,10 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, nodeID strin
 
 	// 删除节点
 	delete(s.nodes, nodeID)
+	
+	// 同步到FileManager
+	s.fileMgr.UpdateNodes(s.nodes)
+	
 	log.Printf("节点已删除: %s", nodeID)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -268,6 +272,9 @@ func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 同步到FileManager
+	s.fileMgr.UpdateNodes(s.nodes)
+
 	log.Printf("节点注册: %s (%s)", req.NodeID, req.IPAddress)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -306,6 +313,9 @@ func (s *Server) configureNode(w http.ResponseWriter, r *http.Request, nodeID st
 	node.AllocatedSpace = req.AllocatedSpace
 	node.Status = NodeStatusConfigured
 	node.ConfiguredAt = time.Now()
+
+	// 同步到FileManager
+	s.fileMgr.UpdateNodes(s.nodes)
 
 	log.Printf("节点配置: %s, 路径: %s, 空间: %dGB", nodeID, req.StoragePath, req.AllocatedSpace/1024/1024/1024)
 
@@ -346,6 +356,9 @@ func (s *Server) heartbeatNode(w http.ResponseWriter, r *http.Request, nodeID st
 		log.Printf("节点 %s 上线", nodeID)
 	}
 
+	// 同步到FileManager
+	s.fileMgr.UpdateNodes(s.nodes)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":  true,
@@ -374,6 +387,9 @@ func (s *Server) speedTestNode(w http.ResponseWriter, r *http.Request, nodeID st
 	node.UploadSpeed = req.UploadSpeed
 	node.DownloadSpeed = req.DownloadSpeed
 	node.LastSpeedTest = time.Now()
+
+	// 同步到FileManager
+	s.fileMgr.UpdateNodes(s.nodes)
 
 	log.Printf("节点 %s 测速完成: 上传=%.2f Mbps, 下载=%.2f Mbps", 
 		nodeID, req.UploadSpeed, req.DownloadSpeed)

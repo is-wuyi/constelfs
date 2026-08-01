@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -73,80 +74,82 @@ func (fm *FileManager) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 生成下载URL
-	downloadURL := fm.generateDownloadURL(fileID, targetVersion)
+	// 从存储节点下载数据
+	data, err := fm.downloadFromNodes(targetVersion)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	log.Printf("文件下载: %s, 版本=%d, 节点=%v", fileID, targetVersion.Version, targetVersion.NodeIDs)
+	// 返回文件数据
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", file.FileName))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Write(data)
 
-	// 返回响应
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(DownloadResponse{
-		Success:     true,
-		File:        file,
-		Version:     targetVersion,
-		DownloadURL: downloadURL,
-	})
+	log.Printf("文件下载成功: %s, 版本=%d, 大小=%d", fileID, targetVersion.Version, len(data))
 }
 
-// generateDownloadURL 生成下载URL
-func (fm *FileManager) generateDownloadURL(fileID string, version *FileVersion) string {
-	// TODO: 生成实际的下载URL
-	// 这里应该根据节点地址和分片信息生成下载URL
-	return fmt.Sprintf("/api/v1/files/%s/versions/%d/download", fileID, version.Version)
-}
-
-// HandleDirectDownload 处理直接下载
-func (fm *FileManager) HandleDirectDownload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+// downloadFromNodes 从存储节点下载数据
+func (fm *FileManager) downloadFromNodes(version *FileVersion) ([]byte, error) {
+	if len(version.ChunkIDs) == 0 {
+		return nil, fmt.Errorf("没有分片数据")
 	}
 
-	// 从URL提取file_id和version
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
-	parts := strings.SplitN(path, "/", 3)
-	if len(parts) < 3 || parts[1] != "versions" || !strings.HasSuffix(parts[2], "/download") {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
-	}
+	// 下载所有分片
+	var allData []byte
+	for _, chunkID := range version.ChunkIDs {
+		// 从第一个可用节点下载
+		var chunkData []byte
+		var err error
 
-	fileID := parts[0]
-	versionStr := strings.TrimSuffix(parts[2], "/download")
-	var version int
-	fmt.Sscanf(versionStr, "%d", &version)
-
-	// 获取文件信息
-	file, exists := fm.files[fileID]
-	if !exists {
-		http.Error(w, `{"error":"File not found"}`, http.StatusNotFound)
-		return
-	}
-
-	// 获取版本
-	versions := fm.versions[fileID]
-	var targetVersion *FileVersion
-	for _, v := range versions {
-		if v.Version == version {
-			targetVersion = v
-			break
+		for _, nodeID := range version.NodeIDs {
+			chunkData, err = fm.downloadChunkFromNode(nodeID, chunkID)
+			if err == nil {
+				break
+			}
+			log.Printf("从节点 %s 下载分片 %s 失败: %v", nodeID, chunkID, err)
 		}
+
+		if err != nil {
+			return nil, fmt.Errorf("下载分片 %s 失败: %w", chunkID, err)
+		}
+
+		allData = append(allData, chunkData...)
 	}
 
-	if targetVersion == nil {
-		http.Error(w, `{"error":"Version not found"}`, http.StatusNotFound)
-		return
+	return allData, nil
+}
+
+// downloadChunkFromNode 从指定节点下载分片
+func (fm *FileManager) downloadChunkFromNode(nodeID, chunkID string) ([]byte, error) {
+	// 获取节点信息
+	node, exists := fm.nodes[nodeID]
+	if !exists {
+		return nil, fmt.Errorf("节点不存在: %s", nodeID)
 	}
 
-	// TODO: 实现实际的文件下载
-	// 这里应该从存储节点读取分片数据并返回给客户端
+	// 构建下载URL
+	url := fmt.Sprintf("http://%s:%d/api/v1/chunks/%s", node.IPAddress, node.Port, chunkID)
 
-	log.Printf("直接下载: %s, 版本=%d, 大小=%d", fileID, version, targetVersion.Size)
+	// 发送下载请求
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("下载请求失败: %w", err)
+	}
+	defer resp.Body.Close()
 
-	// 临时实现：返回文件信息
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"file":    file,
-		"version": targetVersion,
-		"message": "Download not implemented yet",
-	})
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("下载失败: %s", resp.Status)
+	}
+
+	// 读取数据
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取数据失败: %w", err)
+	}
+
+	log.Printf("分片 %s 从节点 %s 下载成功, 大小: %d", chunkID, nodeID, len(data))
+
+	return data, nil
 }

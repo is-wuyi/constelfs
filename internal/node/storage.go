@@ -45,7 +45,7 @@ func (se *StorageEngine) Init() error {
 
 // HandleUpload 处理上传请求
 func (se *StorageEngine) HandleUpload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -53,8 +53,9 @@ func (se *StorageEngine) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	// 获取分片ID
 	chunkID := r.URL.Query().Get("chunk_id")
 	if chunkID == "" {
-		http.Error(w, "Missing chunk_id", http.StatusBadRequest)
-		return
+		// 从URL路径获取
+		path := r.URL.Path
+		chunkID = filepath.Base(path)
 	}
 
 	// 读取数据
@@ -100,8 +101,9 @@ func (se *StorageEngine) HandleDownload(w http.ResponseWriter, r *http.Request) 
 	// 获取分片ID
 	chunkID := r.URL.Query().Get("chunk_id")
 	if chunkID == "" {
-		http.Error(w, "Missing chunk_id", http.StatusBadRequest)
-		return
+		// 从URL路径获取
+		path := r.URL.Path
+		chunkID = filepath.Base(path)
 	}
 
 	// 读取分片文件
@@ -137,8 +139,9 @@ func (se *StorageEngine) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	// 获取分片ID
 	chunkID := r.URL.Query().Get("chunk_id")
 	if chunkID == "" {
-		http.Error(w, "Missing chunk_id", http.StatusBadRequest)
-		return
+		// 从URL路径获取
+		path := r.URL.Path
+		chunkID = filepath.Base(path)
 	}
 
 	// 删除分片文件
@@ -158,6 +161,20 @@ func (se *StorageEngine) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, `{"success":true}`)
+}
+
+// HandleChunk 处理分片请求（根据HTTP方法分发）
+func (se *StorageEngine) HandleChunk(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPut:
+		se.HandleUpload(w, r)
+	case http.MethodGet:
+		se.HandleDownload(w, r)
+	case http.MethodDelete:
+		se.HandleDelete(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // GetStorageInfo 获取存储信息

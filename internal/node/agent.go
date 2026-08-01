@@ -14,7 +14,6 @@ type Agent struct {
 	config     *Config
 	httpClient *http.Client
 	storage    *StorageEngine
-	speedTest  *SpeedTester
 	stopCh     chan struct{}
 }
 
@@ -28,14 +27,10 @@ func New(config *Config) (*Agent, error) {
 		return nil, fmt.Errorf("初始化存储失败: %w", err)
 	}
 
-	// 创建测速器
-	speedTest := NewSpeedTester(config)
-
 	return &Agent{
 		config:     config,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		storage:    storage,
-		speedTest:  speedTest,
 		stopCh:     make(chan struct{}),
 	}, nil
 }
@@ -49,9 +44,6 @@ func (a *Agent) Start() error {
 
 	// 启动心跳
 	go a.heartbeatLoop()
-
-	// 启动定时测速
-	go a.speedTestLoop()
 
 	// 启动HTTP服务
 	go a.startHTTPServer()
@@ -112,57 +104,6 @@ func (a *Agent) heartbeatLoop() {
 	}
 }
 
-// speedTestLoop 测速循环
-func (a *Agent) speedTestLoop() {
-	// 启动时测速一次
-	a.runSpeedTest()
-
-	// 定时测速
-	ticker := time.NewTicker(2 * time.Hour) // 默认2小时测速一次
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			a.runSpeedTest()
-		case <-a.stopCh:
-			return
-		}
-	}
-}
-
-// runSpeedTest 运行测速
-func (a *Agent) runSpeedTest() {
-	result, err := a.speedTest.RunSpeedTest()
-	if err != nil {
-		log.Printf("测速失败: %v", err)
-		return
-	}
-
-	// 上报测速结果到中心服务器
-	if err := a.reportSpeedTest(result); err != nil {
-		log.Printf("上报测速结果失败: %v", err)
-	}
-}
-
-// reportSpeedTest 上报测速结果
-func (a *Agent) reportSpeedTest(result *SpeedTestResult) error {
-	data, _ := json.Marshal(result)
-	url := fmt.Sprintf("%s/api/v1/nodes/%s/speedtest", a.config.ServerAddr, a.config.NodeID)
-
-	resp, err := a.httpClient.Post(url, "application/json", bytes.NewBuffer(data))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("上报测速结果失败: %s", resp.Status)
-	}
-
-	return nil
-}
-
 // sendHeartbeat 发送心跳
 func (a *Agent) sendHeartbeat() error {
 	// 获取存储信息
@@ -198,10 +139,8 @@ func (a *Agent) startHTTPServer() {
 		fmt.Fprintf(w, `{"status":"ok"}`)
 	})
 
-	// 存储API
-	mux.HandleFunc("/api/v1/upload", a.storage.HandleUpload)
-	mux.HandleFunc("/api/v1/download", a.storage.HandleDownload)
-	mux.HandleFunc("/api/v1/delete", a.storage.HandleDelete)
+	// 分片API
+	mux.HandleFunc("/api/v1/chunks/", a.storage.HandleChunk)
 
 	// 存储信息
 	mux.HandleFunc("/api/v1/storage", func(w http.ResponseWriter, r *http.Request) {

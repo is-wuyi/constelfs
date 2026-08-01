@@ -12,18 +12,27 @@ import (
 type FileManager struct {
 	versionManager *VersionManager
 	storage        *StorageManager
+	scheduler      *Scheduler
+	nodes          map[string]*Node
 	files          map[string]*FileInfo
 	versions       map[string][]*FileVersion
 }
 
 // NewFileManager 创建文件管理器
-func NewFileManager(versionManager *VersionManager, storage *StorageManager) *FileManager {
+func NewFileManager(versionManager *VersionManager, storage *StorageManager, scheduler *Scheduler) *FileManager {
 	return &FileManager{
 		versionManager: versionManager,
 		storage:        storage,
+		scheduler:      scheduler,
+		nodes:          make(map[string]*Node),
 		files:          make(map[string]*FileInfo),
 		versions:       make(map[string][]*FileVersion),
 	}
+}
+
+// UpdateNodes 更新节点列表
+func (fm *FileManager) UpdateNodes(nodes map[string]*Node) {
+	fm.nodes = nodes
 }
 
 // HandleFiles 处理文件列表请求
