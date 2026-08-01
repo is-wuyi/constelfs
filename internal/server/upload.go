@@ -115,6 +115,10 @@ func (fm *FileManager) HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 // calculateChunkSize 计算分片大小
 func calculateChunkSize(fileSize int64) int64 {
+	if fileSize == 0 {
+		return 0
+	}
+	
 	const (
 		ChunkSize10MB  = 10 * 1024 * 1024
 		ChunkSize100MB = 100 * 1024 * 1024
@@ -138,8 +142,16 @@ func calculateChunkSize(fileSize int64) int64 {
 
 // uploadChunks 上传分片到存储节点
 func (fm *FileManager) uploadChunks(fileID string, data []byte, replicas int) ([]string, []string, error) {
+	// 检查数据是否为空
+	if len(data) == 0 {
+		return []string{}, []string{}, nil
+	}
+
 	// 1. 将数据分片
 	chunkSize := calculateChunkSize(int64(len(data)))
+	if chunkSize == 0 {
+		return []string{}, []string{}, nil
+	}
 	chunkCount := (int64(len(data)) + chunkSize - 1) / chunkSize
 
 	chunkIDs := make([]string, 0, chunkCount)
