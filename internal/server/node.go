@@ -37,7 +37,11 @@ type Node struct {
 	CPUUsage       float64    `json:"cpu_usage"`
 	MemoryUsage    float64    `json:"memory_usage"`
 	DiskUsage      float64    `json:"disk_usage"`
+	UploadSpeed    float64    `json:"upload_speed"`    // Mbps
+	DownloadSpeed  float64    `json:"download_speed"`  // Mbps
+	OnlineRate     float64    `json:"online_rate"`     // 在线率 (0-1)
 	LastHeartbeat  time.Time  `json:"last_heartbeat"`
+	LastSpeedTest  time.Time  `json:"last_speed_test"`
 	ConfiguredAt   time.Time  `json:"configured_at"`
 	CreatedAt      time.Time  `json:"created_at"`
 }
@@ -66,6 +70,14 @@ type HeartbeatRequest struct {
 	DiskUsage   float64 `json:"disk_usage"`
 	UsedSpace   int64   `json:"used_space"`
 	Status      string  `json:"status"`
+}
+
+// SpeedTestResult 测速结果
+type SpeedTestResult struct {
+	UploadSpeed   float64   `json:"upload_speed"`
+	DownloadSpeed float64   `json:"download_speed"`
+	Latency       int64     `json:"latency"`
+	TestTime      time.Time `json:"test_time"`
 }
 
 // StartNodeChecker 启动节点状态检查器
@@ -129,6 +141,8 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 		s.configureNode(w, r, nodeID)
 	case len(parts) == 2 && parts[1] == "heartbeat" && r.Method == http.MethodPost:
 		s.heartbeatNode(w, r, nodeID)
+	case len(parts) == 2 && parts[1] == "speedtest" && r.Method == http.MethodPost:
+		s.speedTestNode(w, r, nodeID)
 	default:
 		http.Error(w, "Not found", http.StatusNotFound)
 	}
@@ -248,6 +262,7 @@ func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 			CPUUsage:       req.CPUUsage,
 			MemoryUsage:    req.MemoryUsage,
 			DiskUsage:      req.DiskUsage,
+			OnlineRate:     1.0, // 默认在线率100%
 			LastHeartbeat:  time.Now(),
 			CreatedAt:      time.Now(),
 		}
@@ -335,5 +350,36 @@ func (s *Server) heartbeatNode(w http.ResponseWriter, r *http.Request, nodeID st
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":  true,
 		"commands": []string{},
+	})
+}
+
+// speedTestNode 处理节点测速结果
+func (s *Server) speedTestNode(w http.ResponseWriter, r *http.Request, nodeID string) {
+	var req SpeedTestResult
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	node, exists := s.nodes[nodeID]
+	if !exists {
+		http.Error(w, "Node not found", http.StatusNotFound)
+		return
+	}
+
+	// 更新测速结果
+	node.UploadSpeed = req.UploadSpeed
+	node.DownloadSpeed = req.DownloadSpeed
+	node.LastSpeedTest = time.Now()
+
+	log.Printf("节点 %s 测速完成: 上传=%.2f Mbps, 下载=%.2f Mbps", 
+		nodeID, req.UploadSpeed, req.DownloadSpeed)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
 	})
 }

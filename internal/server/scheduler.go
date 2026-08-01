@@ -73,29 +73,28 @@ func (s *Scheduler) SelectNodes(nodes map[string]*Node, n int, excludeNodes []st
 func (s *Scheduler) ScoreNode(node *Node) float64 {
 	score := 0.0
 
-	// 1. CPU使用率（权重40%）- 使用率越低越好
-	cpuScore := (100 - node.CPUUsage) * 0.4
-	score += cpuScore
+	// 1. 上行带宽（权重30%）- 家宽通常上行低，是瓶颈
+	uploadScore := node.UploadSpeed / 1000 * 30 // 假设1000Mbps为满分
+	score += uploadScore
 
-	// 2. 可用空间（权重30%）- 空间越大越好
+	// 2. 空间利用率（权重25%）- 已用/预分配，越低越好
 	if node.AllocatedSpace > 0 {
-		availableSpace := node.AllocatedSpace - node.UsedSpace
-		spaceRatio := float64(availableSpace) / float64(node.AllocatedSpace)
-		spaceScore := spaceRatio * 30
+		spaceRatio := float64(node.UsedSpace) / float64(node.AllocatedSpace)
+		spaceScore := (1 - spaceRatio) * 25
 		score += spaceScore
 	}
 
-	// 3. 内存使用率（权重20%）- 使用率越低越好
-	memoryScore := (100 - node.MemoryUsage) * 0.2
-	score += memoryScore
+	// 3. 下行带宽（权重20%）- 家宽通常下行高
+	downloadScore := node.DownloadSpeed / 1000 * 20
+	score += downloadScore
 
-	// 4. 响应时间（权重10%）- 基于最后心跳时间
-	// 心跳越近，说明节点越健康
-	timeSinceHeartbeat := time.Since(node.LastHeartbeat).Seconds()
-	if timeSinceHeartbeat < 30 {
-		latencyScore := (30 - timeSinceHeartbeat) / 30 * 10
-		score += latencyScore
-	}
+	// 4. 在线率（权重15%）- 历史在线时间比例
+	onlineScore := node.OnlineRate * 15
+	score += onlineScore
+
+	// 5. CPU/内存（权重10%）- 系统负载
+	healthScore := (100 - node.CPUUsage - node.MemoryUsage) / 100 * 10
+	score += healthScore
 
 	return math.Round(score*100) / 100
 }
