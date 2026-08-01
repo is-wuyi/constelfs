@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ConstelFS - 分布式文件存储系统</title>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/element-plus"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .card { margin-bottom: 20px; }
+        .file-item { display: flex; align-items: center; padding: 10px; border-bottom: 1px solid #eee; }
+        .file-item:hover { background: #f5f7fa; }
+        .file-icon { margin-right: 10px; font-size: 24px; }
+        .file-info { flex: 1; }
+        .file-name { font-weight: bold; }
+        .file-meta { color: #999; font-size: 12px; }
+        .file-actions { display: flex; gap: 10px; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <div class="header">
+                <h1>🌟 ConstelFS</h1>
+                <p>分布式文件存储系统</p>
+            </div>
+
+            <el-card class="card">
+                <template #header>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span>文件管理</span>
+                        <el-button type="primary" @click="showUploadDialog">上传文件</el-button>
+                    </div>
+                </template>
+
+                <div v-if="files.length === 0" style="text-align: center; color: #999; padding: 40px;">
+                    暂无文件，请上传文件
+                </div>
+
+                <div v-for="file in files" :key="file.file_id" class="file-item">
+                    <div class="file-icon">
+                        📄
+                    </div>
+                    <div class="file-info">
+                        <div class="file-name">{{ file.file_name }}</div>
+                        <div class="file-meta">
+                            大小: {{ formatSize(file.size) }} | 
+                            版本: {{ file.latest_version }} | 
+                            更新时间: {{ formatTime(file.updated_at) }}
+                        </div>
+                    </div>
+                    <div class="file-actions">
+                        <el-button size="small" @click="showFileDetail(file)">详情</el-button>
+                        <el-button size="small" type="primary" @click="downloadFile(file)">下载</el-button>
+                        <el-button size="small" type="danger" @click="deleteFile(file)">删除</el-button>
+                    </div>
+                </div>
+            </el-card>
+
+            <!-- 节点状态 -->
+            <el-card class="card">
+                <template #header>
+                    <span>节点状态</span>
+                </template>
+                <el-table :data="nodes" style="width: 100%">
+                    <el-table-column prop="node_id" label="节点ID" />
+                    <el-table-column prop="ip_address" label="IP地址" />
+                    <el-table-column prop="status" label="状态">
+                        <template #default="scope">
+                            <el-tag :type="scope.row.status === 'online' ? 'success' : 'danger'">
+                                {{ scope.row.status }}
+                            </el-tag>
+                        </template>
+                    </el-table-column>
+                    <el-table-column label="存储空间">
+                        <template #default="scope">
+                            {{ formatSize(scope.row.used_space) }} / {{ formatSize(scope.row.allocated_space) }}
+                        </template>
+                    </el-table-column>
+                    <el-table-column prop="upload_speed" label="上行带宽">
+                        <template #default="scope">
+                            {{ scope.row.upload_speed ? scope.row.upload_speed.toFixed(2) + ' Mbps' : '-' }}
+                        </template>
+                    </el-table-column>
+                </el-table>
+            </el-card>
+
+            <!-- 文件详情对话框 -->
+            <el-dialog v-model="detailVisible" title="文件详情" width="600px">
+                <div v-if="selectedFile">
+                    <el-descriptions :column="1" border>
+                        <el-descriptions-item label="文件名">{{ selectedFile.file_name }}</el-descriptions-item>
+                        <el-descriptions-item label="文件路径">{{ selectedFile.file_path }}</el-descriptions-item>
+                        <el-descriptions-item label="文件大小">{{ formatSize(selectedFile.size) }}</el-descriptions-item>
+                        <el-descriptions-item label="最新版本">{{ selectedFile.latest_version }}</el-descriptions-item>
+                        <el-descriptions-item label="版本数量">{{ selectedFile.version_count }}</el-descriptions-item>
+                        <el-descriptions-item label="最大版本数">{{ selectedFile.max_versions }}</el-descriptions-item>
+                        <el-descriptions-item label="创建时间">{{ formatTime(selectedFile.created_at) }}</el-descriptions-item>
+                        <el-descriptions-item label="更新时间">{{ formatTime(selectedFile.updated_at) }}</el-descriptions-item>
+                    </el-descriptions>
+
+                    <h4 style="margin-top: 20px;">历史版本</h4>
+                    <el-table :data="fileVersions" style="width: 100%">
+                        <el-table-column prop="version" label="版本号" />
+                        <el-table-column label="大小">
+                            <template #default="scope">
+                                {{ formatSize(scope.row.size) }}
+                            </template>
+                        </el-table-column>
+                        <el-table-column prop="hash" label="哈希" />
+                        <el-table-column label="存储节点">
+                            <template #default="scope">
+                                {{ scope.row.node_ids ? scope.row.node_ids.join(', ') : '-' }}
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="创建时间">
+                            <template #default="scope">
+                                {{ formatTime(scope.row.created_at) }}
+                            </template>
+                        </el-table-column>
+                        <el-table-column label="操作">
+                            <template #default="scope">
+                                <el-button size="small" @click="downloadVersion(selectedFile, scope.row)">下载</el-button>
+                                <el-button size="small" @click="rollbackVersion(selectedFile, scope.row)">回滚</el-button>
+                            </template>
+                        </el-table-column>
+                    </el-table>
+                </div>
+            </el-dialog>
+
+            <!-- 上传对话框 -->
+            <el-dialog v-model="uploadVisible" title="上传文件" width="400px">
+                <el-upload
+                    drag
+                    action="/api/v1/upload"
+                    :on-success="handleUploadSuccess"
+                    :on-error="handleUploadError"
+                    :data="uploadData"
+                    :before-upload="beforeUpload"
+                >
+                    <el-icon class="el-icon--upload"><i class="el-icon-upload"></i></el-icon>
+                    <div class="el-upload__text">将文件拖到此处，或<em>点击上传</em></div>
+                    <template #tip>
+                        <div class="el-upload__tip">支持任意文件格式</div>
+                    </template>
+                </el-upload>
+            </el-dialog>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted } = Vue;
+
+        createApp({
+            setup() {
+                const files = ref([]);
+                const nodes = ref([]);
+                const detailVisible = ref(false);
+                const uploadVisible = ref(false);
+                const selectedFile = ref(null);
+                const fileVersions = ref([]);
+
+                // 加载文件列表
+                const loadFiles = async () => {
+                    try {
+                        const response = await axios.get('/api/v1/files');
+                        files.value = response.data.files || [];
+                    } catch (error) {
+                        console.error('加载文件列表失败:', error);
+                    }
+                };
+
+                // 加载节点列表
+                const loadNodes = async () => {
+                    try {
+                        const response = await axios.get('/api/v1/nodes');
+                        nodes.value = response.data.nodes || [];
+                    } catch (error) {
+                        console.error('加载节点列表失败:', error);
+                    }
+                };
+
+                // 显示文件详情
+                const showFileDetail = async (file) => {
+                    selectedFile.value = file;
+                    try {
+                        const response = await axios.get(`/api/v1/files/${file.file_id}`);
+                        fileVersions.value = response.data.versions || [];
+                    } catch (error) {
+                        console.error('加载版本列表失败:', error);
+                        fileVersions.value = [];
+                    }
+                    detailVisible.value = true;
+                };
+
+                // 下载文件
+                const downloadFile = (file) => {
+                    window.open(`/api/v1/files/${file.file_id}/versions/0/download`);
+                };
+
+                // 下载指定版本
+                const downloadVersion = (file, version) => {
+                    window.open(`/api/v1/files/${file.file_id}/versions/${version.version}/download`);
+                };
+
+                // 回滚版本
+                const rollbackVersion = async (file, version) => {
+                    try {
+                        await axios.post(`/api/v1/files/${file.file_id}/rollback`, {
+                            version: version.version
+                        });
+                        ElMessage.success('回滚成功');
+                        loadFiles();
+                        showFileDetail(file);
+                    } catch (error) {
+                        ElMessage.error('回滚失败: ' + error.message);
+                    }
+                };
+
+                // 删除文件
+                const deleteFile = async (file) => {
+                    try {
+                        await ElMessageBox.confirm('确定要删除该文件吗？', '确认');
+                        await axios.delete(`/api/v1/files/${file.file_id}`);
+                        ElMessage.success('删除成功');
+                        loadFiles();
+                    } catch (error) {
+                        if (error !== 'cancel') {
+                            ElMessage.error('删除失败: ' + error.message);
+                        }
+                    }
+                };
+
+                // 显示上传对话框
+                const showUploadDialog = () => {
+                    uploadVisible.value = true;
+                };
+
+                // 上传前处理
+                const beforeUpload = (file) => {
+                    uploadData.value = {
+                        file_name: file.name,
+                        file_path: '/' + file.name
+                    };
+                    return true;
+                };
+
+                // 上传成功
+                const handleUploadSuccess = (response) => {
+                    ElMessage.success('上传成功');
+                    uploadVisible.value = false;
+                    loadFiles();
+                };
+
+                // 上传失败
+                const handleUploadError = (error) => {
+                    ElMessage.error('上传失败: ' + error.message);
+                };
+
+                // 格式化文件大小
+                const formatSize = (bytes) => {
+                    if (!bytes) return '-';
+                    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                    let size = bytes;
+                    let unitIndex = 0;
+                    while (size >= 1024 && unitIndex < units.length - 1) {
+                        size /= 1024;
+                        unitIndex++;
+                    }
+                    return size.toFixed(2) + ' ' + units[unitIndex];
+                };
+
+                // 格式化时间
+                const formatTime = (time) => {
+                    if (!time) return '-';
+                    return new Date(time).toLocaleString('zh-CN');
+                };
+
+                const uploadData = ref({});
+
+                onMounted(() => {
+                    loadFiles();
+                    loadNodes();
+                });
+
+                return {
+                    files,
+                    nodes,
+                    detailVisible,
+                    uploadVisible,
+                    selectedFile,
+                    fileVersions,
+                    uploadData,
+                    showFileDetail,
+                    downloadFile,
+                    downloadVersion,
+                    rollbackVersion,
+                    deleteFile,
+                    showUploadDialog,
+                    beforeUpload,
+                    handleUploadSuccess,
+                    handleUploadError,
+                    formatSize,
+                    formatTime
+                };
+            }
+        }).use(ElementPlus).mount('#app');
+    </script>
+</body>
+</html>
