@@ -36,7 +36,7 @@ func New(config *Config) (*Server, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"Nodes", "Files", "Chunks", "Replicas", "Users", "SpeedTests"}
+		buckets := []string{"Nodes", "Files", "Chunks", "Replicas", "Users", "SpeedTests", "EncryptionKeys"}
 		for _, name := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("创建Bucket %s 失败: %w", name, err)
@@ -54,7 +54,6 @@ func New(config *Config) (*Server, error) {
 	versionMgr := NewVersionManager(storage)
 	fileMgr := NewFileManager(versionMgr, storage, scheduler)
 
-	// 设置持久化管理器
 	storage.SetPersistence(persist)
 	fileMgr.SetPersistence(persist)
 
@@ -77,7 +76,6 @@ func New(config *Config) (*Server, error) {
 	return s, nil
 }
 
-// loadData 从数据库加载数据
 func (s *Server) loadData() error {
 	nodes, err := s.persist.LoadNodes()
 	if err != nil {
@@ -133,6 +131,7 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/v1/write", s.handleWrite)
 	mux.HandleFunc("/api/v1/write/confirm", s.handleConfirmWrite)
 	mux.HandleFunc("/api/v1/version/create", s.fileMgr.HandleCreateVersion)
+	mux.HandleFunc("/api/v1/encryption/", s.HandleEncryption)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
 
 	mux.Handle("/", http.FileServer(http.Dir("web")))

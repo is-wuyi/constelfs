@@ -2,7 +2,11 @@ package client
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,90 +17,152 @@ import (
 )
 
 const (
-	// DefaultChunkSize 默认分片大小 64MB
 	DefaultChunkSize = 64 * 1024 * 1024
 )
 
-// UploadRequest 上传请求
-type UploadRequest struct {
-	FilePath string
-	Replicas int
-}
-
-// UploadResult 上传结果
 type UploadResult struct {
-	Success  bool
-	FileID   string
-	Chunks   []string
-	Error    error
+	Success      bool
+	FileID       string
+	Chunks       []string
+	EncryptionKey string
+	Error        error
 }
 
-// ChunkUploader 分片上传器
 type ChunkUploader struct {
 	config     *Config
 	httpClient *http.Client
 	chunkSize  int64
+	encrypt    bool
 }
 
-// NewChunkUploader 创建分片上传器
 func NewChunkUploader(config *Config) *ChunkUploader {
 	return &ChunkUploader{
 		config:     config,
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		httpClient: &http.Client{Timeout: 120 * time.Second},
 		chunkSize:  DefaultChunkSize,
+		encrypt:    config.Encrypt,
 	}
 }
 
-// Upload 上传文件
+// generateKey 生成AES-256密钥
+func generateKey() (string, error) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(key), nil
+}
+
+// encryptData 加密数据
+func encryptData(data []byte, keyStr string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(keyStr)
+	if err != nil {
+		return nil, err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+
+	return gcm.Seal(nonce, nonce, data, nil), nil
+}
+
+// decryptData 解密数据
+func decryptData(ciphertext []byte, keyStr string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(keyStr)
+	if err != nil {
+		return nil, err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	return gcm.Open(nil, nonce, ciphertext, nil)
+}
+
 func (u *ChunkUploader) Upload(filePath string, replicas int) (*UploadResult, error) {
-	// 打开文件
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("打开文件失败: %w", err)
 	}
 	defer file.Close()
 
-	// 获取文件信息
 	fileInfo, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("获取文件信息失败: %w", err)
 	}
 
-	// 生成文件ID
 	fileID := fmt.Sprintf("%s_%d", filepath.Base(filePath), fileInfo.ModTime().UnixNano())
 
-	// 计算分片数量
+	// 生成加密密钥（如果启用加密）
+	var encryptionKey string
+	if u.encrypt {
+		encryptionKey, err = generateKey()
+		if err != nil {
+			return nil, fmt.Errorf("生成加密密钥失败: %w", err)
+		}
+	}
+
 	chunkCount := (fileInfo.Size() + u.chunkSize - 1) / u.chunkSize
 
 	fmt.Printf("开始上传: %s\n", filePath)
 	fmt.Printf("文件大小: %d bytes\n", fileInfo.Size())
 	fmt.Printf("分片数量: %d\n", chunkCount)
 	fmt.Printf("副本数量: %d\n", replicas)
+	fmt.Printf("加密: %v\n", u.encrypt)
 
-	// 逐个分片上传
 	var chunkIDs []string
 	var chunkHash string
 	for i := int64(0); i < chunkCount; i++ {
-		// 计算分片偏移和大小
 		offset := i * u.chunkSize
 		size := u.chunkSize
 		if offset+size > fileInfo.Size() {
 			size = fileInfo.Size() - offset
 		}
 
-		// 读取分片数据
 		chunkData := make([]byte, size)
 		_, err := file.ReadAt(chunkData, offset)
 		if err != nil && err != io.EOF {
 			return nil, fmt.Errorf("读取分片失败: %w", err)
 		}
 
-		// 计算分片hash
-		hash := sha256.Sum256(chunkData)
+		// 加密分片数据（如果启用加密）
+		uploadData := chunkData
+		if u.encrypt && encryptionKey != "" {
+			uploadData, err = encryptData(chunkData, encryptionKey)
+			if err != nil {
+				return nil, fmt.Errorf("加密分片失败: %w", err)
+			}
+		}
+
+		hash := sha256.Sum256(chunkData) // 使用原始数据的hash
 		chunkHash = fmt.Sprintf("%x", hash)
 
-		// 上传分片
-		chunkID, err := u.uploadChunk(fileID, i, chunkData, chunkHash, replicas)
+		chunkID, err := u.uploadChunk(fileID, i, uploadData, chunkHash, replicas)
 		if err != nil {
 			return nil, fmt.Errorf("上传分片 %d 失败: %w", i, err)
 		}
@@ -105,24 +171,19 @@ func (u *ChunkUploader) Upload(filePath string, replicas int) (*UploadResult, er
 		fmt.Printf("分片 %d/%d 上传成功\n", i+1, chunkCount)
 	}
 
-	// 创建版本
-	if err := u.createVersion(fileID, filepath.Base(filePath), filePath, fileInfo.Size(), chunkHash, chunkIDs, replicas); err != nil {
+	if err := u.createVersion(fileID, filepath.Base(filePath), filePath, fileInfo.Size(), chunkHash, chunkIDs, replicas, encryptionKey); err != nil {
 		return nil, fmt.Errorf("创建版本失败: %w", err)
 	}
 
 	return &UploadResult{
-		Success: true,
-		FileID:  fileID,
-		Chunks:  chunkIDs,
+		Success:       true,
+		FileID:        fileID,
+		Chunks:        chunkIDs,
+		EncryptionKey: encryptionKey,
 	}, nil
 }
 
-// createVersion 创建版本
-func (u *ChunkUploader) createVersion(fileID, fileName, filePath string, fileSize int64, hash string, chunkIDs []string, replicas int) error {
-	// 获取节点列表（从第一个分片的响应中获取）
-	// 这里简化处理，使用空列表
-	nodeIDs := []string{}
-	
+func (u *ChunkUploader) createVersion(fileID, fileName, filePath string, fileSize int64, hash string, chunkIDs []string, replicas int, encryptionKey string) error {
 	req := map[string]interface{}{
 		"file_id":   fileID,
 		"file_name": fileName,
@@ -130,9 +191,9 @@ func (u *ChunkUploader) createVersion(fileID, fileName, filePath string, fileSiz
 		"file_size": fileSize,
 		"hash":      hash,
 		"chunk_ids": chunkIDs,
-		"node_ids":  nodeIDs,
+		"node_ids":  []string{},
 	}
-	
+
 	reqBody, _ := json.Marshal(req)
 	resp, err := u.httpClient.Post(
 		fmt.Sprintf("%s/api/v1/version/create", u.config.ServerAddr),
@@ -143,7 +204,7 @@ func (u *ChunkUploader) createVersion(fileID, fileName, filePath string, fileSiz
 		return fmt.Errorf("请求创建版本失败: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	var result struct {
 		Success bool   `json:"success"`
 		Error   string `json:"error"`
@@ -151,17 +212,46 @@ func (u *ChunkUploader) createVersion(fileID, fileName, filePath string, fileSiz
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("解析响应失败: %w", err)
 	}
-	
+
 	if !result.Success {
 		return fmt.Errorf("创建版本失败: %s", result.Error)
 	}
-	
+
+	// 保存加密密钥到服务器
+	if encryptionKey != "" {
+		if err := u.saveEncryptionKey(fileID, encryptionKey); err != nil {
+			fmt.Printf("警告: 保存加密密钥失败: %v\n", err)
+		}
+	}
+
 	return nil
 }
 
-// uploadChunk 上传单个分片
+func (u *ChunkUploader) saveEncryptionKey(fileID, key string) error {
+	req := map[string]interface{}{
+		"file_id": fileID,
+		"key":     key,
+	}
+
+	reqBody, _ := json.Marshal(req)
+	resp, err := u.httpClient.Post(
+		fmt.Sprintf("%s/api/v1/encryption/key", u.config.ServerAddr),
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("保存密钥失败: %s", resp.Status)
+	}
+
+	return nil
+}
+
 func (u *ChunkUploader) uploadChunk(fileID string, index int64, data []byte, hash string, replicas int) (string, error) {
-	// 1. 向中心服务器请求写入
 	writeReq := map[string]interface{}{
 		"file_id":   fileID,
 		"file_name": fmt.Sprintf("chunk_%d", index),
@@ -181,10 +271,12 @@ func (u *ChunkUploader) uploadChunk(fileID string, index int64, data []byte, has
 	defer resp.Body.Close()
 
 	var writeResp struct {
-		Success  bool     `json:"success"`
-		ChunkIDs []string `json:"chunk_ids"`
-		Nodes    []string `json:"nodes"`
-		Error    string   `json:"error"`
+		Success   bool     `json:"success"`
+		ChunkID   string   `json:"chunk_id"`
+		ChunkIDs  []string `json:"chunk_ids"`
+		Nodes     []string `json:"nodes"`
+		NodeAddrs []string `json:"node_addrs"`
+		Error     string   `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&writeResp); err != nil {
 		return "", fmt.Errorf("解析响应失败: %w", err)
@@ -194,22 +286,17 @@ func (u *ChunkUploader) uploadChunk(fileID string, index int64, data []byte, has
 		return "", fmt.Errorf("写入请求失败: %s", writeResp.Error)
 	}
 
-	chunkID := writeResp.ChunkIDs[0]
+	chunkID := writeResp.ChunkID
+	if len(writeResp.ChunkIDs) > 0 {
+		chunkID = writeResp.ChunkIDs[0]
+	}
 
-	// 2. 向每个节点上传分片
-	for _, nodeID := range writeResp.Nodes {
-		// 获取节点地址
-		nodeAddr, err := u.getNodeAddress(nodeID)
-		if err != nil {
-			return "", fmt.Errorf("获取节点地址失败: %w", err)
-		}
-
+	for _, nodeAddr := range writeResp.NodeAddrs {
 		if err := u.uploadToNode(nodeAddr, chunkID, data); err != nil {
-			return "", fmt.Errorf("上传到节点 %s 失败: %w", nodeID, err)
+			return "", fmt.Errorf("上传到节点 %s 失败: %w", nodeAddr, err)
 		}
 	}
 
-	// 3. 确认写入完成
 	confirmReq := map[string]interface{}{
 		"chunk_id": chunkID,
 		"hash":     hash,
@@ -240,7 +327,6 @@ func (u *ChunkUploader) uploadChunk(fileID string, index int64, data []byte, has
 	return chunkID, nil
 }
 
-// getNodeAddress 获取节点地址
 func (u *ChunkUploader) getNodeAddress(nodeID string) (string, error) {
 	resp, err := u.httpClient.Get(fmt.Sprintf("%s/api/v1/nodes/%s", u.config.ServerAddr, nodeID))
 	if err != nil {
@@ -259,9 +345,8 @@ func (u *ChunkUploader) getNodeAddress(nodeID string) (string, error) {
 	return fmt.Sprintf("%s:%d", node.IPAddress, node.Port), nil
 }
 
-// uploadToNode 上传分片到节点
 func (u *ChunkUploader) uploadToNode(nodeAddr string, chunkID string, data []byte) error {
-	url := fmt.Sprintf("http://%s/api/v1/chunks/upload?chunk_id=%s", nodeAddr, chunkID)
+	url := fmt.Sprintf("http://%s/api/v1/chunks/%s", nodeAddr, chunkID)
 
 	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(data))
 	if err != nil {

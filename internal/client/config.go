@@ -6,21 +6,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config 客户端配置
 type Config struct {
 	ServerAddr string `yaml:"server_addr"`
-	LogLevel   string `yaml:"log_level"`
+	Encrypt    bool   `yaml:"encrypt"`
 }
 
-// DefaultConfig 默认配置
 func DefaultConfig() *Config {
 	return &Config{
 		ServerAddr: "http://193.134.209.37:8080",
-		LogLevel:   "info",
+		Encrypt:    false,
 	}
 }
 
-// LoadConfig 加载配置文件
 func LoadConfig(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
