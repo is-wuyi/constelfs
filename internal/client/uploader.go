@@ -105,7 +105,7 @@ func (u *ChunkUploader) Upload(filePath string, replicas int) (*UploadResult, er
 	}
 
 	// 4. 创建版本
-	if err := u.createVersion(fileID, filepath.Base(filePath), filePath, fileInfo.Size(), hashStr, chunkIDs, replicas); err != nil {
+	if err := u.createVersion(fileID, filepath.Base(filePath), filePath, fileInfo.Size(), chunkHash, chunkIDs, replicas); err != nil {
 		return nil, fmt.Errorf("创建版本失败: %w", err)
 	}
 
